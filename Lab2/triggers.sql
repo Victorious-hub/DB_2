@@ -59,13 +59,19 @@ BEGIN
     old_group_id := :old.group_id;
 
     IF new_group_id <> old_group_id THEN
-      UPDATE groups
-      SET c_val = c_val + 1
-      WHERE id = new_group_id;
+      SELECT COUNT(*) INTO v_exists FROM groups WHERE id = new_group_id;
+      IF v_exists > 0 THEN
+        UPDATE groups
+        SET c_val = c_val + 1
+        WHERE id = new_group_id;
+      END IF;
 
-      UPDATE groups
-      SET c_val = c_val - 1
-      WHERE id = old_group_id;
+      SELECT COUNT(*) INTO v_exists FROM groups WHERE id = old_group_id;
+      IF v_exists > 0 THEN
+        UPDATE groups
+        SET c_val = c_val - 1
+        WHERE id = old_group_id;
+      END IF;
     END IF;
 
   ELSIF deleting THEN
@@ -82,7 +88,6 @@ EXCEPTION
   WHEN OTHERS THEN
     DBMS_OUTPUT.PUT_LINE('Error updating c_val: ' || SQLERRM);
 END;
-
 
 -- Check if student id unique
 
