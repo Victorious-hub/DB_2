@@ -144,9 +144,9 @@ CREATE OR REPLACE FUNCTION calculate_annual_compensation(
     v_total_compensation NUMBER;
 BEGIN
     IF p_monthly_salary <= 0 THEN
-        RETURN NULL; -- Явно возвращаем NULL
-    ELSIF p_bonus_percent < 0 THEN
-        RETURN NULL; -- Явно возвращаем NULL
+        RETURN NULL;
+    ELSIF p_bonus_percent < 0 OR p_bonus_percent > 100 THEN
+        RETURN NULL;
     END IF;
 
     v_bonus_factor := 1 + (p_bonus_percent / 100);

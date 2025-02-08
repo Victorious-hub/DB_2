@@ -1,0 +1,11 @@
+CREATE TABLE students (
+    id NUMBER PRIMARY KEY,
+    name VARCHAR2(20) NOT NULL,
+    group_id NUMBER NOT NULL
+);
+
+CREATE TABLE groups (
+    id NUMBER PRIMARY KEY,
+    name VARCHAR2(20) NOT NULL,
+    C_VAL NUMBER NOT NULL
+);
