@@ -23,3 +23,9 @@ INSERT INTO students (name, group_id) VALUES ('Alice1', 1001);
 DELETE FROM groups
 WHERE id = 1001;
 SELECT * FROM STUDENTS;
+
+UPDATE students
+SET name = 'Alice Updated'
+WHERE id = 7;
+
+CALL restore_students_state('08/02/25 17:08:39.726561000');
