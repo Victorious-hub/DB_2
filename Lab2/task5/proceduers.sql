@@ -1,5 +1,4 @@
 -- Procedure to restore student's data
-
 CREATE OR REPLACE PROCEDURE restore_students_state(p_timestamp TIMESTAMP) IS
      cur_time TIMESTAMP;
 BEGIN

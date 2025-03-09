@@ -136,6 +136,8 @@ END;
 -- При этом предусмотреть что процент вводится как целое число, и требуется преобразовать его к дробному. 
 -- Предусмотреть защиту от ввода некорректных данных.
 
+
+-- recompile than
 CREATE OR REPLACE FUNCTION calculate_annual_compensation(
     p_monthly_salary NUMBER,
     p_bonus_percent NUMBER
@@ -165,8 +167,3 @@ BEGIN
     v_result := calculate_annual_compensation(-5000, 10);
     DBMS_OUTPUT.PUT_LINE('Total Compensation: ' || v_result);
 END;
-
--- NVL(check for error is sql query with SELECT)
-SELECT 
-    NVL(TO_CHAR(calculate_annual_compensation(-5000, 10)), 'Invalid Input') 
-FROM dual;

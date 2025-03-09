@@ -1,15 +1,3 @@
-CREATE TABLE students (
-    id NUMBER PRIMARY KEY,
-    name VARCHAR2(20) NOT NULL,
-    group_id NUMBER NOT NULL
-);
-
-CREATE TABLE groups (
-    id NUMBER PRIMARY KEY,
-    name VARCHAR2(20) NOT NULL,
-    C_VAL NUMBER NOT NULL
-);
-
 CREATE TABLE students_log (
     id NUMBER PRIMARY KEY NOT NULL,
     action VARCHAR2(6) NOT NULL CHECK (action IN ('INSERT', 'UPDATE', 'DELETE')),
