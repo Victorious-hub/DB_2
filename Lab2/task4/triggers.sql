@@ -1,22 +1,19 @@
--- Student log triggers
+INSERT INTO students (name, group_id) VALUES ('Bo211b', 9);
+INSERT INTO students (name, group_id) VALUES ('B2o2101b', 16);
 
-CREATE OR REPLACE TRIGGER students_log_trigger
-AFTER INSERT OR UPDATE OR DELETE ON students
-FOR EACH ROW
-BEGIN
-    IF INSERTING THEN
-        INSERT INTO students_log (id, action, new_student_id, student_name, group_id, action_date)
-        VALUES (students_log_seq.nextval, 'INSERT', :new.id, :new.name, :new.group_id, SYSTIMESTAMP);
-    ELSIF UPDATING THEN
-        INSERT INTO students_log (id, action, old_student_id, new_student_id, student_name, group_id, action_date)
-        VALUES (students_log_seq.nextval, 'UPDATE', :old.id, :new.id, :new.name, :new.group_id, SYSTIMESTAMP);
-    ELSIF DELETING THEN
-        INSERT INTO students_log (id, action, old_student_id, student_name, group_id, action_date)
-        VALUES (students_log_seq.nextval, 'DELETE', :old.id, :old.name, :old.group_id, SYSTIMESTAMP);
-    END IF;
-END;
+SELECT * FROM students;
+INSERT INTO groups (name) VALUES ('Epsi12lon');
 
-CREATE SEQUENCE students_log_seq
-START WITH 1
-INCREMENT BY 1
-NOCACHE NOCYCLE;
+-- SELECT * FROM students_log;
+
+SELECT * FROM groups;
+DELETE FROM groups
+WHERE id = 14;
+
+UPDATE students
+SET group_id = 14
+WHERE name = 'B2o2101b';
+
+-- CALL restore_students_state('09/03/25 11:53:43.473423000');
+-- -- DELETE FROM students_log
+-- -- WHERE id != 99999;

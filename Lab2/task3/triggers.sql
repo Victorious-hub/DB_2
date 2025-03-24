@@ -1,15 +1,4 @@
 -- Cascadian delete foreign key
--- CREATE OR REPLACE TRIGGER cascade_delete_students
--- BEFORE DELETE ON groups
--- FOR EACH ROW
--- BEGIN
---   global_vars.g_deleting_group := :OLD.id;
-
---   DELETE FROM students
---   WHERE group_id = :OLD.id;
--- END;
-
--- Cascadian delete foreign key
 CREATE OR REPLACE PACKAGE global_vars AS
   g_deleting_group NUMBER;
 END global_vars;

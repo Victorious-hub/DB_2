@@ -16,7 +16,7 @@ BEGIN
     COMMIT;
 END;
 
--- 3. Напишите собственнуюфункцию, которая выводит TRUE если четных значений val в таблице MyTable больше, 
+-- 3. Напишите собственную функцию, которая выводит TRUE если четных значений val в таблице MyTable больше, 
 -- FALSE если больше нечетных значений и EQUAL если количество четных и нечетных равно
 
 CREATE OR REPLACE FUNCTION check_even_odd_balance RETURN VARCHAR2 IS
