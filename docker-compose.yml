@@ -1,82 +1,19 @@
-# services:
-#   oracle-db:
-#     image: gvenzl/oracle-xe:21-slim
-#     container_name: oracle-xe11    
-#     environment:
-#       ORACLE_PASSWORD: 1password
-#       APP_USER: admin                 
-#       APP_USER_PASSWORD: 1password
-#     ports:
-#       - "1521:1521"                   
-#     volumes:
-#       - oracle-volume:/opt/oracle/oradata 
-#     networks:
-#       - oracle-net
-#     healthcheck:
-#       test: ["CMD", "sqlplus", "-S", "sys/password@localhost:1523/XE as sysdba", "exit"]
-#       interval: 10s
-#       retries: 10
-#       start_period: 30s
-#       timeout: 5s
-
-# volumes:
-#   oracle-volume:
-#     driver: local
-
-# networks:
-#   oracle-net:
-#     driver: bridge
-
-
 version: '3.8'
-
 services:
   oracle-21:
     image: gvenzl/oracle-xe:21-slim
     container_name: oracle-xe-21
     restart: always
     ports:
-      - "1521:1521"  # Oracle listener
-      - "5500:5500"  # Enterprise Manager Express
+      - "1521:1521"
+      - "5500:5500"
     environment:
-      ORACLE_PASSWORD: password  # Change this to a strong password
-      ORACLE_DATABASE: ORCL  # Default database name
-      APP_USER: app_user  # Custom application user
-      APP_USER_PASSWORD: password  # Password for the app user
+      ORACLE_PASSWORD: password
+      ORACLE_DATABASE: ORCL
+      APP_USER: app_user
+      APP_USER_PASSWORD: password
     volumes:
-      - oracle-data:/opt/oracle/oradata  # Persistent storage for the database
+      - oracle-data:/opt/oracle/oradata
 
 volumes:
   oracle-data:
-
-
-
-
-# services:
-#   oracle-db:
-#     image: gvenzl/oracle-free
-#     container_name: oracle-free-xe
-#     environment:
-#       ORACLE_PASSWORD: password
-#       APP_USER: admin
-#       APP_USER_PASSWORD: password
-#     ports:
-#       - "1523:1521"                   
-#     volumes:
-#       - oracle-volume:/opt/oracle/oradata 
-#     networks:
-#       - oracle-net
-#     healthcheck:
-#       test: ["CMD", "sqlplus", "-S", "sys/password@localhost:1523/XE as sysdba", "exit"]
-#       interval: 10s
-#       retries: 10
-#       start_period: 30s
-#       timeout: 5s
-
-# volumes:
-#   oracle-volume:
-#     driver: local
-
-# networks:
-#   oracle-net:
-#     driver: bridge

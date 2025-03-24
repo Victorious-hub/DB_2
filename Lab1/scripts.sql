@@ -16,7 +16,7 @@ BEGIN
     COMMIT;
 END;
 
--- 3. Напишите собственнуюфункцию, которая выводит TRUE если четных значений val в таблице MyTable больше, 
+-- 3. Напишите собственную функцию, которая выводит TRUE если четных значений val в таблице MyTable больше, 
 -- FALSE если больше нечетных значений и EQUAL если количество четных и нечетных равно
 
 CREATE OR REPLACE FUNCTION check_even_odd_balance RETURN VARCHAR2 IS
@@ -136,6 +136,8 @@ END;
 -- При этом предусмотреть что процент вводится как целое число, и требуется преобразовать его к дробному. 
 -- Предусмотреть защиту от ввода некорректных данных.
 
+
+-- recompile than
 CREATE OR REPLACE FUNCTION calculate_annual_compensation(
     p_monthly_salary NUMBER,
     p_bonus_percent NUMBER
@@ -144,9 +146,9 @@ CREATE OR REPLACE FUNCTION calculate_annual_compensation(
     v_total_compensation NUMBER;
 BEGIN
     IF p_monthly_salary <= 0 THEN
-        RETURN NULL; -- Явно возвращаем NULL
-    ELSIF p_bonus_percent < 0 THEN
-        RETURN NULL; -- Явно возвращаем NULL
+        RETURN NULL;
+    ELSIF p_bonus_percent < 0 OR p_bonus_percent > 100 THEN
+        RETURN NULL;
     END IF;
 
     v_bonus_factor := 1 + (p_bonus_percent / 100);
@@ -165,8 +167,3 @@ BEGIN
     v_result := calculate_annual_compensation(-5000, 10);
     DBMS_OUTPUT.PUT_LINE('Total Compensation: ' || v_result);
 END;
-
--- NVL(check for error is sql query with SELECT)
-SELECT 
-    NVL(TO_CHAR(calculate_annual_compensation(-5000, 10)), 'Invalid Input') 
-FROM dual;
