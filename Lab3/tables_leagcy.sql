@@ -1,4 +1,4 @@
--- DEPRECATED!
+-- DEPRECATED! Legacy
 
 CREATE USER admin_schema IDENTIFIED BY admin_password;
 GRANT CONNECT, RESOURCE TO admin_schema;

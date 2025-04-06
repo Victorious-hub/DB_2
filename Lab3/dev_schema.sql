@@ -92,11 +92,11 @@ CREATE TABLE dev_schema.table_d (
     CONSTRAINT fk_d_c FOREIGN KEY (c_id) REFERENCES dev_schema.table_c (id)
 );
 
--- Циклическая зависимость
 ALTER TABLE dev_schema.table_a
 ADD CONSTRAINT fk_a_d FOREIGN KEY (id) REFERENCES dev_schema.table_d (id);
 
 
+-- Циклические зависимости и порядок создания
 CREATE TABLE dev_schema.departments (
     department_id NUMBER PRIMARY KEY,
     department_name VARCHAR2(100) NOT NULL

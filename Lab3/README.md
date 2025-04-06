@@ -40,7 +40,7 @@ GRANT SYSDBA TO SUPER_SCHEMA CONTAINER=ALL; - grant sysdba for super_schema user
 
 ```
 BEGIN
-    compare_schemes('DEV_SCHEMA_NAME', 'PROD_SCHEMA_NAME');
+    compare_schemes('DEV_SCHEMA', 'PROD_SCHEMA');
 END;
 ```
 
