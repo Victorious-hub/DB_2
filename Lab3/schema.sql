@@ -68,7 +68,8 @@ CREATE OR REPLACE FUNCTION compare_tables(
     PROCEDURE compare_and_generate_ddl(source_schema IN VARCHAR2, target_schema IN VARCHAR2, ddl_action IN VARCHAR2) IS
     BEGIN
         SELECT TABLE_NAME BULK COLLECT INTO v_tables
-        FROM ALL_TABLES WHERE OWNER = source_schema
+        FROM ALL_TABLES
+        WHERE OWNER = source_schema
         AND TABLE_NAME NOT IN (SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = target_schema);
 
         IF v_tables.COUNT > 0 THEN
@@ -76,9 +77,10 @@ CREATE OR REPLACE FUNCTION compare_tables(
                 DBMS_OUTPUT.PUT_LINE('  - ' || v_tables(i));
                 v_ddl_commands.EXTEND;
                 IF ddl_action = 'CREATE' THEN
-                    v_ddl_commands(v_ddl_commands.COUNT) := 'CREATE TABLE ' || target_schema || '.' || v_tables(i) || ' AS SELECT * FROM ' || source_schema || '.' || v_tables(i) || ' WHERE 1 = 0;';
+                    v_ddl_commands(v_ddl_commands.COUNT) := 'CREATE TABLE ' || target_schema || '.' || v_tables(i) ||
+                                                        ' AS SELECT * FROM ' || source_schema || '.' || v_tables(i) || ' WHERE 1 = 0;';
                 ELSIF ddl_action = 'DROP' THEN
-                    v_ddl_commands(v_ddl_commands.COUNT) := 'DROP TABLE ' || target_schema || '.' || v_tables(i) || ';';
+                    v_ddl_commands(v_ddl_commands.COUNT) := 'DROP TABLE ' || source_schema || '.' || v_tables(i) || ';';
                 END IF;
             END LOOP;
             v_table_differences := TRUE;
@@ -86,14 +88,17 @@ CREATE OR REPLACE FUNCTION compare_tables(
             DBMS_OUTPUT.PUT_LINE('Все таблицы из ' || source_schema || ' присутствуют в ' || target_schema || '.');
         END IF;
     END compare_and_generate_ddl;
+
 BEGIN
     DBMS_OUTPUT.PUT_LINE('Таблицы, которые есть в DEV_SCHEMA, но отсутствуют в PROD_SCHEMA:');
     compare_and_generate_ddl(dev_schema_name, prod_schema_name, 'CREATE');
+    
     DBMS_OUTPUT.PUT_LINE('Таблицы, которые есть в PROD_SCHEMA, но отсутствуют в DEV_SCHEMA:');
     compare_and_generate_ddl(prod_schema_name, dev_schema_name, 'DROP');
 
     RETURN v_table_differences;
 END compare_tables;
+
 
 CREATE OR REPLACE FUNCTION compare_table_structure(
     dev_schema_name IN VARCHAR2,
@@ -252,44 +257,6 @@ BEGIN
     END LOOP;
 END add_constraints;
 
-CREATE OR REPLACE PROCEDURE get_plsql_procs_and_funcs(
-  p_schema_name IN VARCHAR2, 
-  p_object_name IN VARCHAR2, 
-  p_code OUT VARCHAR2
-) IS
-  v_code VARCHAR2(32767);
-BEGIN
-  v_code := '';
-
-  FOR r IN (
-    SELECT object_name, object_type
-    FROM all_objects
-    WHERE (object_type = 'FUNCTION' OR object_type = 'PROCEDURE')
-    AND owner = UPPER(p_schema_name)
-    AND object_name = UPPER(p_object_name)
-  ) LOOP
-    FOR proc_func IN (
-      SELECT text AS text 
-      FROM all_source
-      WHERE owner = UPPER(p_schema_name)
-      AND name = r.object_name
-      ORDER BY line
-    ) LOOP
-      DECLARE
-        v_text VARCHAR2(32767);
-      BEGIN
-        v_text := TRIM(TRIM(CHR(10) FROM proc_func.text)); 
-        IF LENGTH(v_text) > 0 THEN
-           v_text := REGEXP_REPLACE(v_text, '\s+', ' ');
-           v_code := v_code || v_text || CHR(10);
-        END IF;
-      END;
-    END LOOP;
-  END LOOP;
-
-  p_code := v_code;
-END get_plsql_procs_and_funcs;
-
 CREATE OR REPLACE PROCEDURE compare_functions_and_procedures(
     dev_schema_name IN VARCHAR2,
     prod_schema_name IN VARCHAR2,
@@ -406,6 +373,45 @@ BEGIN
         DBMS_OUTPUT.PUT_LINE('Функции и процедуры в схемах ' || UPPER(dev_schema_name) || ' и ' || UPPER(prod_schema_name) || ' совпадают.');
     END IF;
 END compare_functions_and_procedures;
+
+
+CREATE OR REPLACE PROCEDURE get_plsql_procs_and_funcs(
+  p_schema_name IN VARCHAR2, 
+  p_object_name IN VARCHAR2, 
+  p_code OUT VARCHAR2
+) IS
+  v_code VARCHAR2(32767);
+BEGIN
+  v_code := '';
+
+  FOR r IN (
+    SELECT object_name, object_type
+    FROM all_objects
+    WHERE (object_type = 'FUNCTION' OR object_type = 'PROCEDURE')
+    AND owner = UPPER(p_schema_name)
+    AND object_name = UPPER(p_object_name)
+  ) LOOP
+    FOR proc_func IN (
+      SELECT text AS text 
+      FROM all_source
+      WHERE owner = UPPER(p_schema_name)
+      AND name = r.object_name
+      ORDER BY line
+    ) LOOP
+      DECLARE
+        v_text VARCHAR2(32767);
+      BEGIN
+        v_text := TRIM(TRIM(CHR(10) FROM proc_func.text)); 
+        IF LENGTH(v_text) > 0 THEN
+           v_text := REGEXP_REPLACE(v_text, '\s+', ' ');
+           v_code := v_code || v_text || CHR(10);
+        END IF;
+      END;
+    END LOOP;
+  END LOOP;
+
+  p_code := v_code;
+END get_plsql_procs_and_funcs;
 
 CREATE OR REPLACE PROCEDURE compare_indexes(
     dev_schema_name IN VARCHAR2,
@@ -706,5 +712,5 @@ CREATE OR REPLACE TYPE CLOB_LIST AS TABLE OF CLOB;
 
 
 BEGIN
-    compare_schemes('DEV_SCHEMA_NAME', 'PROD_SCHEMA_NAME');
+    compare_schemes('DEV_SCHEMA', 'PROD_SCHEMA');
 END;
