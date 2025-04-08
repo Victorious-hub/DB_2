@@ -177,11 +177,61 @@ BEGIN
     END IF;
   END;
 
-  DBMS_OUTPUT.PUT_LINE('Перечень таблиц (либо отсутствуют в PROD, либо отличаются по структуре),');
-  DBMS_OUTPUT.PUT_LINE('отсортированные по порядку создания:');
-  FOR i IN 1 .. v_sorted_count LOOP
-    DBMS_OUTPUT.PUT_LINE('  ' || v_sorted(i));
+  -- filepath: untitled:Untitled-21
+FOR rec IN (
+  SELECT table_name 
+  FROM all_tables
+  WHERE owner = UPPER(p_dev_schema)
+    AND table_name NOT IN (SELECT table_name FROM all_tables WHERE owner = UPPER(p_prod_schema))
+) LOOP
+  DBMS_OUTPUT.PUT_LINE('Таблица есть в DEV, но отсутствует в PROD: ' || rec.table_name);
+END LOOP;
+
+FOR rec IN (
+  SELECT table_name 
+  FROM all_tables
+  WHERE owner = UPPER(p_prod_schema)
+    AND table_name NOT IN (SELECT table_name FROM all_tables WHERE owner = UPPER(p_dev_schema))
+) LOOP
+  DBMS_OUTPUT.PUT_LINE('Таблица есть в PROD, но отсутствует в DEV: ' || rec.table_name);
+END LOOP;
+
+FOR rec IN (
+  SELECT dt.table_name
+  FROM (SELECT table_name FROM all_tables WHERE owner = UPPER(p_dev_schema)) dt
+  JOIN (SELECT table_name FROM all_tables WHERE owner = UPPER(p_prod_schema)) pt
+    ON dt.table_name = pt.table_name
+) LOOP
+  DBMS_OUTPUT.PUT_LINE('Таблица с различиями: ' || rec.table_name);
+  FOR col_diff IN (
+    SELECT column_name, data_type, data_length, nullable
+    FROM (
+      SELECT column_name, data_type, data_length, nullable
+      FROM all_tab_columns
+      WHERE owner = UPPER(p_dev_schema) AND table_name = rec.table_name
+      MINUS
+      SELECT column_name, data_type, data_length, nullable
+      FROM all_tab_columns
+      WHERE owner = UPPER(p_prod_schema) AND table_name = rec.table_name
+    )
+    UNION ALL
+    SELECT column_name, data_type, data_length, nullable
+    FROM (
+      SELECT column_name, data_type, data_length, nullable
+      FROM all_tab_columns
+      WHERE owner = UPPER(p_prod_schema) AND table_name = rec.table_name
+      MINUS
+      SELECT column_name, data_type, data_length, nullable
+      FROM all_tab_columns
+      WHERE owner = UPPER(p_dev_schema) AND table_name = rec.table_name
+    )
+  ) LOOP
+    DBMS_OUTPUT.PUT_LINE('  Различие в колонке: ' || col_diff.column_name || 
+                         ' (Тип данных: ' || col_diff.data_type || 
+                         ', Длина: ' || col_diff.data_length || 
+                         ', Nullable: ' || col_diff.nullable || ')');
   END LOOP;
+END LOOP;
 
   DECLARE
     TYPE t_varchar_table_all IS TABLE OF VARCHAR2(128);
@@ -253,7 +303,13 @@ BEGIN
         END;
       END LOOP;
       IF v_all_sorted_count_prod < v_all_tables_prod.COUNT THEN
-        DBMS_OUTPUT.PUT_LINE('Циклические зависимости в PROD: есть');
+      DBMS_OUTPUT.PUT_LINE('Циклические зависимости в PROD: есть');
+      DBMS_OUTPUT.PUT_LINE('Следующие таблицы участвуют в цикле:');
+        FOR i IN 1 .. v_all_tables_prod.COUNT LOOP
+          IF v_all_dep_count_prod(v_all_tables_prod(i)) > 0 THEN
+            DBMS_OUTPUT.PUT_LINE('- ' || v_all_tables_prod(i));
+          END IF;
+        END LOOP;
       ELSE
         DBMS_OUTPUT.PUT_LINE('Циклические зависимости в PROD: нет');
       END IF;
@@ -331,95 +387,242 @@ BEGIN
       END LOOP;
       IF v_all_sorted_count_dev < v_all_tables_dev.COUNT THEN
         DBMS_OUTPUT.PUT_LINE('Циклические зависимости в DEV: есть');
+        DBMS_OUTPUT.PUT_LINE('Следующие таблицы участвуют в цикле:');
+        FOR i IN 1 .. v_all_tables_dev.COUNT LOOP
+          IF v_all_dep_count_dev(v_all_tables_dev(i)) > 0 THEN
+            DBMS_OUTPUT.PUT_LINE('- ' || v_all_tables_dev(i));
+          END IF;
+        END LOOP;
       ELSE
         DBMS_OUTPUT.PUT_LINE('Циклические зависимости в DEV: нет');
       END IF;
     END;
   END;
 
-  DBMS_OUTPUT.PUT_LINE('Процедуры:');
-  FOR rec IN (
-    SELECT object_name FROM all_objects
-    WHERE owner = UPPER(p_dev_schema) AND object_type = 'PROCEDURE'
-    ORDER BY object_name
-  ) LOOP
-    BEGIN
-      v_dev_ddl := DBMS_METADATA.GET_DDL('PROCEDURE', rec.object_name, UPPER(p_dev_schema));
-    EXCEPTION WHEN OTHERS THEN
-      v_dev_ddl := 'NO DDL';
-    END;
-    BEGIN
-      v_prod_ddl := DBMS_METADATA.GET_DDL('PROCEDURE', rec.object_name, UPPER(p_prod_schema));
-    EXCEPTION WHEN OTHERS THEN
-      v_prod_ddl := 'NO DDL';
-    END;
-    IF v_prod_ddl = 'NO DDL' OR normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
-      DBMS_OUTPUT.PUT_LINE('  ' || rec.object_name);
-    END IF;
-  END LOOP;
+ -- filepath: untitled:Untitled-21
+DBMS_OUTPUT.PUT_LINE('Процедуры:');
+FOR rec IN (
+  SELECT object_name 
+  FROM all_objects
+  WHERE owner = UPPER(p_dev_schema) AND object_type = 'PROCEDURE'
+    AND object_name NOT IN (
+      SELECT object_name 
+      FROM all_objects
+      WHERE owner = UPPER(p_prod_schema) AND object_type = 'PROCEDURE'
+    )
+) LOOP
+  DBMS_OUTPUT.PUT_LINE('Процедура есть в DEV, но отсутствует в PROD: ' || rec.object_name);
+END LOOP;
 
-  DBMS_OUTPUT.PUT_LINE('Функции:');
-  FOR rec IN (
-    SELECT object_name FROM all_objects
-    WHERE owner = UPPER(p_dev_schema) AND object_type = 'FUNCTION'
-    ORDER BY object_name
-  ) LOOP
-    BEGIN
-      v_dev_ddl := DBMS_METADATA.GET_DDL('FUNCTION', rec.object_name, UPPER(p_dev_schema));
-    EXCEPTION WHEN OTHERS THEN
-      v_dev_ddl := 'NO DDL';
-    END;
-    BEGIN
-      v_prod_ddl := DBMS_METADATA.GET_DDL('FUNCTION', rec.object_name, UPPER(p_prod_schema));
-    EXCEPTION WHEN OTHERS THEN
-      v_prod_ddl := 'NO DDL';
-    END;
-    IF v_prod_ddl = 'NO DDL' OR normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
-      DBMS_OUTPUT.PUT_LINE('  ' || rec.object_name);
-    END IF;
-  END LOOP;
+FOR rec IN (
+  SELECT object_name 
+  FROM all_objects
+  WHERE owner = UPPER(p_prod_schema) AND object_type = 'PROCEDURE'
+    AND object_name NOT IN (
+      SELECT object_name 
+      FROM all_objects
+      WHERE owner = UPPER(p_dev_schema) AND object_type = 'PROCEDURE'
+    )
+) LOOP
+  DBMS_OUTPUT.PUT_LINE('Процедура есть в PROD, но отсутствует в DEV: ' || rec.object_name);
+END LOOP;
+
+FOR rec IN (
+  SELECT object_name 
+  FROM all_objects
+  WHERE owner = UPPER(p_dev_schema) AND object_type = 'PROCEDURE'
+    AND object_name IN (
+      SELECT object_name 
+      FROM all_objects
+      WHERE owner = UPPER(p_prod_schema) AND object_type = 'PROCEDURE'
+    )
+) LOOP
+  BEGIN
+    v_dev_ddl := DBMS_METADATA.GET_DDL('PROCEDURE', rec.object_name, UPPER(p_dev_schema));
+  EXCEPTION WHEN OTHERS THEN
+    v_dev_ddl := 'NO DDL';
+  END;
+  BEGIN
+    v_prod_ddl := DBMS_METADATA.GET_DDL('PROCEDURE', rec.object_name, UPPER(p_prod_schema));
+  EXCEPTION WHEN OTHERS THEN
+    v_prod_ddl := 'NO DDL';
+  END;
+  IF v_prod_ddl = 'NO DDL' THEN
+    DBMS_OUTPUT.PUT_LINE('Процедура есть в DEV, но отсутствует в PROD: ' || rec.object_name);
+  ELSIF normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+    DBMS_OUTPUT.PUT_LINE('Процедура с различиями: ' || rec.object_name);
+    DBMS_OUTPUT.PUT_LINE('  DDL в DEV: ' || SUBSTR(v_dev_ddl, 1, 4000));
+    DBMS_OUTPUT.PUT_LINE('  DDL в PROD: ' || SUBSTR(v_prod_ddl, 1, 4000));
+  END IF;
+END LOOP;
+
+DBMS_OUTPUT.PUT_LINE('Функции:');
+FOR rec IN (
+  SELECT object_name 
+  FROM all_objects
+  WHERE owner = UPPER(p_dev_schema) AND object_type = 'FUNCTION'
+    AND object_name NOT IN (
+      SELECT object_name 
+      FROM all_objects
+      WHERE owner = UPPER(p_prod_schema) AND object_type = 'FUNCTION'
+    )
+) LOOP
+  DBMS_OUTPUT.PUT_LINE('Функция есть в DEV, но отсутствует в PROD: ' || rec.object_name);
+END LOOP;
+
+FOR rec IN (
+  SELECT object_name 
+  FROM all_objects
+  WHERE owner = UPPER(p_prod_schema) AND object_type = 'FUNCTION'
+    AND object_name NOT IN (
+      SELECT object_name 
+      FROM all_objects
+      WHERE owner = UPPER(p_dev_schema) AND object_type = 'FUNCTION'
+    )
+) LOOP
+  DBMS_OUTPUT.PUT_LINE('Функция есть в PROD, но отсутствует в DEV: ' || rec.object_name);
+END LOOP;
+
+FOR rec IN (
+  SELECT object_name 
+  FROM all_objects
+  WHERE owner = UPPER(p_dev_schema) AND object_type = 'FUNCTION'
+    AND object_name IN (
+      SELECT object_name 
+      FROM all_objects
+      WHERE owner = UPPER(p_prod_schema) AND object_type = 'FUNCTION'
+    )
+) LOOP
+  BEGIN
+    v_dev_ddl := DBMS_METADATA.GET_DDL('FUNCTION', rec.object_name, UPPER(p_dev_schema));
+  EXCEPTION WHEN OTHERS THEN
+    v_dev_ddl := 'NO DDL';
+  END;
+  BEGIN
+    v_prod_ddl := DBMS_METADATA.GET_DDL('FUNCTION', rec.object_name, UPPER(p_prod_schema));
+  EXCEPTION WHEN OTHERS THEN
+    v_prod_ddl := 'NO DDL';
+  END;
+  IF v_prod_ddl = 'NO DDL' THEN
+    DBMS_OUTPUT.PUT_LINE('Функция есть в DEV, но отсутствует в PROD: ' || rec.object_name);
+  ELSIF normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+    DBMS_OUTPUT.PUT_LINE('Функция с различиями: ' || rec.object_name);
+    DBMS_OUTPUT.PUT_LINE('  DDL в DEV: ' || SUBSTR(v_dev_ddl, 1, 4000));
+    DBMS_OUTPUT.PUT_LINE('  DDL в PROD: ' || SUBSTR(v_prod_ddl, 1, 4000));
+  END IF;
+END LOOP;
 
   DBMS_OUTPUT.PUT_LINE('Пакеты:');
-  FOR rec IN (
-    SELECT object_name FROM all_objects
-    WHERE owner = UPPER(p_dev_schema) AND object_type = 'PACKAGE'
-    ORDER BY object_name
-  ) LOOP
-    BEGIN
-      v_dev_ddl := DBMS_METADATA.GET_DDL('PACKAGE', rec.object_name, UPPER(p_dev_schema));
-    EXCEPTION WHEN OTHERS THEN
-      v_dev_ddl := 'NO DDL';
-    END;
-    BEGIN
-      v_prod_ddl := DBMS_METADATA.GET_DDL('PACKAGE', rec.object_name, UPPER(p_prod_schema));
-    EXCEPTION WHEN OTHERS THEN
-      v_prod_ddl := 'NO DDL';
-    END;
-    IF v_prod_ddl = 'NO DDL' OR normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
-      DBMS_OUTPUT.PUT_LINE('  ' || rec.object_name || ' (PACKAGE)');
-    END IF;
-  END LOOP;
+FOR rec IN (
+  SELECT object_name 
+  FROM all_objects
+  WHERE owner = UPPER(p_dev_schema) AND object_type = 'PACKAGE'
+    AND object_name NOT IN (
+      SELECT object_name 
+      FROM all_objects
+      WHERE owner = UPPER(p_prod_schema) AND object_type = 'PACKAGE'
+    )
+) LOOP
+  DBMS_OUTPUT.PUT_LINE('Пакет есть в DEV, но отсутствует в PROD: ' || rec.object_name);
+END LOOP;
+
+FOR rec IN (
+  SELECT object_name 
+  FROM all_objects
+  WHERE owner = UPPER(p_prod_schema) AND object_type = 'PACKAGE'
+    AND object_name NOT IN (
+      SELECT object_name 
+      FROM all_objects
+      WHERE owner = UPPER(p_dev_schema) AND object_type = 'PACKAGE'
+    )
+) LOOP
+  DBMS_OUTPUT.PUT_LINE('Пакет есть в PROD, но отсутствует в DEV: ' || rec.object_name);
+END LOOP;
+
+FOR rec IN (
+  SELECT object_name 
+  FROM all_objects
+  WHERE owner = UPPER(p_dev_schema) AND object_type = 'PACKAGE'
+    AND object_name IN (
+      SELECT object_name 
+      FROM all_objects
+      WHERE owner = UPPER(p_prod_schema) AND object_type = 'PACKAGE'
+    )
+) LOOP
+  BEGIN
+    v_dev_ddl := DBMS_METADATA.GET_DDL('PACKAGE', rec.object_name, UPPER(p_dev_schema));
+  EXCEPTION WHEN OTHERS THEN
+    v_dev_ddl := 'NO DDL';
+  END;
+  BEGIN
+    v_prod_ddl := DBMS_METADATA.GET_DDL('PACKAGE', rec.object_name, UPPER(p_prod_schema));
+  EXCEPTION WHEN OTHERS THEN
+    v_prod_ddl := 'NO DDL';
+  END;
+  IF v_prod_ddl = 'NO DDL' THEN
+    DBMS_OUTPUT.PUT_LINE('Пакет есть в DEV, но отсутствует в PROD: ' || rec.object_name);
+  ELSIF normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+    DBMS_OUTPUT.PUT_LINE('Пакет с различиями: ' || rec.object_name);
+    DBMS_OUTPUT.PUT_LINE('  DDL в DEV: ' || SUBSTR(v_dev_ddl, 1, 4000));
+    DBMS_OUTPUT.PUT_LINE('  DDL в PROD: ' || SUBSTR(v_prod_ddl, 1, 4000));
+  END IF;
+END LOOP;
 
   DBMS_OUTPUT.PUT_LINE('Индексы:');
-  FOR rec IN (
-    SELECT index_name FROM all_indexes
-    WHERE owner = UPPER(p_dev_schema) AND index_name NOT LIKE 'SYS_%'
-    ORDER BY index_name
-  ) LOOP
-    BEGIN
-      v_dev_ddl := DBMS_METADATA.GET_DDL('INDEX', rec.index_name, UPPER(p_dev_schema));
-    EXCEPTION WHEN OTHERS THEN
-      v_dev_ddl := 'NO DDL';
-    END;
-    BEGIN
-      v_prod_ddl := DBMS_METADATA.GET_DDL('INDEX', rec.index_name, UPPER(p_prod_schema));
-    EXCEPTION WHEN OTHERS THEN
-      v_prod_ddl := 'NO DDL';
-    END;
-    IF v_prod_ddl = 'NO DDL' OR normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
-      DBMS_OUTPUT.PUT_LINE('  ' || rec.index_name);
-    END IF;
-  END LOOP;
+FOR rec IN (
+  SELECT index_name 
+  FROM all_indexes
+  WHERE owner = UPPER(p_dev_schema) AND index_name NOT LIKE 'SYS_%'
+    AND index_name NOT IN (
+      SELECT index_name 
+      FROM all_indexes
+      WHERE owner = UPPER(p_prod_schema) AND index_name NOT LIKE 'SYS_%'
+    )
+) LOOP
+  DBMS_OUTPUT.PUT_LINE('Индекс есть в DEV, но отсутствует в PROD: ' || rec.index_name);
+END LOOP;
+
+FOR rec IN (
+  SELECT index_name 
+  FROM all_indexes
+  WHERE owner = UPPER(p_prod_schema) AND index_name NOT LIKE 'SYS_%'
+    AND index_name NOT IN (
+      SELECT index_name 
+      FROM all_indexes
+      WHERE owner = UPPER(p_dev_schema) AND index_name NOT LIKE 'SYS_%'
+    )
+) LOOP
+  DBMS_OUTPUT.PUT_LINE('Индекс есть в PROD, но отсутствует в DEV: ' || rec.index_name);
+END LOOP;
+
+FOR rec IN (
+  SELECT index_name 
+  FROM all_indexes
+  WHERE owner = UPPER(p_dev_schema) AND index_name NOT LIKE 'SYS_%'
+    AND index_name IN (
+      SELECT index_name 
+      FROM all_indexes
+      WHERE owner = UPPER(p_prod_schema) AND index_name NOT LIKE 'SYS_%'
+    )
+) LOOP
+  BEGIN
+    v_dev_ddl := DBMS_METADATA.GET_DDL('INDEX', rec.index_name, UPPER(p_dev_schema));
+  EXCEPTION WHEN OTHERS THEN
+    v_dev_ddl := 'NO DDL';
+  END;
+  BEGIN
+    v_prod_ddl := DBMS_METADATA.GET_DDL('INDEX', rec.index_name, UPPER(p_prod_schema));
+  EXCEPTION WHEN OTHERS THEN
+    v_prod_ddl := 'NO DDL';
+  END;
+  IF v_prod_ddl = 'NO DDL' THEN
+    DBMS_OUTPUT.PUT_LINE('Индекс есть в DEV, но отсутствует в PROD: ' || rec.index_name);
+  ELSIF normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+    DBMS_OUTPUT.PUT_LINE('Индекс с различиями: ' || rec.index_name);
+    DBMS_OUTPUT.PUT_LINE('  DDL в DEV: ' || SUBSTR(v_dev_ddl, 1, 4000));
+    DBMS_OUTPUT.PUT_LINE('  DDL в PROD: ' || SUBSTR(v_prod_ddl, 1, 4000));
+  END IF;
+END LOOP;
 
   DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'CONSTRAINTS', TRUE);
   DBMS_OUTPUT.PUT_LINE('Скрипт чтобы привести ' || p_prod_schema || ' к ' || p_dev_schema);
@@ -578,7 +781,6 @@ BEGIN
   LOOP
     DBMS_OUTPUT.PUT_LINE('DROP INDEX ' || rec.index_name || ';');
   END LOOP;
-
 END;
 
 BEGIN
