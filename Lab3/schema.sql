@@ -1,716 +1,586 @@
-CREATE OR REPLACE PROCEDURE compare_schemes(
-    dev_schema_name IN VARCHAR2,
-    prod_schema_name IN VARCHAR2
-) IS
-    v_ddl_commands CLOB_LIST := CLOB_LIST();
-    v_has_differences BOOLEAN := FALSE;
-    v_table_differences BOOLEAN := FALSE;
-    v_any_differences BOOLEAN := FALSE;
-    v_has_circular_dependencies BOOLEAN := FALSE;
-BEGIN
-    DBMS_OUTPUT.PUT_LINE('');
+CREATE OR REPLACE PROCEDURE Compare_Schemas(
+  p_dev_schema  IN VARCHAR2,
+  p_prod_schema IN VARCHAR2
+)
+  AUTHID CURRENT_USER
+AS
+  TYPE t_varchar_table IS TABLE OF VARCHAR2(128);
+  v_affected_tables t_varchar_table := t_varchar_table();
 
-    DBMS_OUTPUT.PUT_LINE('--------------------> TABLES COMPARISON <--------------------');
-    v_table_differences := compare_tables(dev_schema_name, prod_schema_name, v_ddl_commands);
-    DBMS_OUTPUT.PUT_LINE('--------------------> TABLES COMPARISON <--------------------');
-    
-    DBMS_OUTPUT.PUT_LINE('');
-    
-    DBMS_OUTPUT.PUT_LINE('--------------------> TABLES STRUCTURE COMPARISON <--------------------');
-    v_has_differences := compare_table_structure(dev_schema_name, prod_schema_name, v_ddl_commands);
-    add_constraints(dev_schema_name, prod_schema_name, v_ddl_commands);
-    DBMS_OUTPUT.PUT_LINE('--------------------> TABLES STRUCTURE COMPARISON <--------------------');
-        
-    DBMS_OUTPUT.PUT_LINE('');
+  TYPE t_issue_map IS TABLE OF VARCHAR2(10) INDEX BY VARCHAR2(128);
+  v_issue_map t_issue_map;
 
-    DBMS_OUTPUT.PUT_LINE('--------------------> PROCEDURE AND FUNCTION COMPARISON <--------------------');
-    compare_functions_and_procedures(dev_schema_name, prod_schema_name, v_ddl_commands);
-    DBMS_OUTPUT.PUT_LINE('--------------------> PROCEDURE AND FUNCTION COMPARISON <--------------------');
+  TYPE t_dep_count_map IS TABLE OF NUMBER INDEX BY VARCHAR2(128);
+  v_dep_count t_dep_count_map;
 
-    DBMS_OUTPUT.PUT_LINE('');
+  TYPE t_children_map IS TABLE OF t_varchar_table INDEX BY VARCHAR2(128);
+  v_children t_children_map;
 
-    DBMS_OUTPUT.PUT_LINE('--------------------> INDEX COMPARISON <--------------------');
-    compare_indexes(dev_schema_name, prod_schema_name, v_ddl_commands);
-    DBMS_OUTPUT.PUT_LINE('--------------------> INDEX COMPARISON <--------------------');
+  v_sorted         t_varchar_table := t_varchar_table();
+  v_sorted_count   PLS_INTEGER := 0;
+  v_count          NUMBER;
+  v_table_name     VARCHAR2(128);
+  v_cycles_found   BOOLEAN := FALSE;
 
-    DBMS_OUTPUT.PUT_LINE('');
+  v_dev_ddl        CLOB;
+  v_prod_ddl       CLOB;
 
-    DBMS_OUTPUT.PUT_LINE('--------------------> PACKAGE COMPARISON <--------------------');
-    compare_packages(dev_schema_name, prod_schema_name, v_ddl_commands);
-    DBMS_OUTPUT.PUT_LINE('--------------------> PACKAGE COMPARISON <--------------------');
+  FUNCTION normalize_ddl(p_ddl IN CLOB) RETURN CLOB IS
+    v_normalized CLOB;
+  BEGIN
+    v_normalized := p_ddl;
+    v_normalized := REPLACE(v_normalized, CHR(10), ' ');
+    v_normalized := REPLACE(v_normalized, CHR(13), ' ');
+    v_normalized := REGEXP_REPLACE(v_normalized, '\s+', ' ');
+    v_normalized := TRIM(v_normalized);
+    v_normalized := REGEXP_REPLACE(v_normalized, '"[^"]+"\.', '');
+    v_normalized := REGEXP_REPLACE(v_normalized, 'EDITIONABLE', '');
+    v_normalized := REGEXP_REPLACE(v_normalized, 'END\s+\w+;', 'END;');
+    RETURN v_normalized;
+  EXCEPTION
+    WHEN OTHERS THEN
+      RETURN p_ddl;
+  END normalize_ddl;
 
-    DBMS_OUTPUT.PUT_LINE('');
-
-    DBMS_OUTPUT.PUT_LINE('--------------------> ПОРЯДОК СОЗДАНИЯ ТАБЛИЦ <--------------------');
-    determine_table_creation_order(dev_schema_name, prod_schema_name);
-    DBMS_OUTPUT.PUT_LINE('--------------------> ПОРЯДОК СОЗДАНИЯ ТАБЛИЦ <--------------------');
-
-    DBMS_OUTPUT.PUT_LINE('');
-
-    DBMS_OUTPUT.PUT_LINE('--------------------> DDL COMMANDS <--------------------');
-    FOR i IN 1 .. v_ddl_commands.COUNT LOOP
-        DBMS_OUTPUT.PUT_LINE(v_ddl_commands(i));
-    END LOOP;
-    DBMS_OUTPUT.PUT_LINE('--------------------> DDL COMMANDS <--------------------');
-
-    DBMS_OUTPUT.PUT_LINE('');
-END;
-
-CREATE OR REPLACE FUNCTION compare_tables(
-    dev_schema_name IN VARCHAR2,
-    prod_schema_name IN VARCHAR2,
-    v_ddl_commands IN OUT CLOB_LIST
-) RETURN BOOLEAN IS
-    TYPE table_list IS TABLE OF VARCHAR2(30);
-    v_tables table_list;
-    v_table_differences BOOLEAN := FALSE;
-
-    PROCEDURE compare_and_generate_ddl(source_schema IN VARCHAR2, target_schema IN VARCHAR2, ddl_action IN VARCHAR2) IS
-    BEGIN
-        SELECT TABLE_NAME BULK COLLECT INTO v_tables
-        FROM ALL_TABLES
-        WHERE OWNER = source_schema
-        AND TABLE_NAME NOT IN (SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = target_schema);
-
-        IF v_tables.COUNT > 0 THEN
-            FOR i IN 1 .. v_tables.COUNT LOOP
-                DBMS_OUTPUT.PUT_LINE('  - ' || v_tables(i));
-                v_ddl_commands.EXTEND;
-                IF ddl_action = 'CREATE' THEN
-                    v_ddl_commands(v_ddl_commands.COUNT) := 'CREATE TABLE ' || target_schema || '.' || v_tables(i) ||
-                                                        ' AS SELECT * FROM ' || source_schema || '.' || v_tables(i) || ' WHERE 1 = 0;';
-                ELSIF ddl_action = 'DROP' THEN
-                    v_ddl_commands(v_ddl_commands.COUNT) := 'DROP TABLE ' || source_schema || '.' || v_tables(i) || ';';
-                END IF;
-            END LOOP;
-            v_table_differences := TRUE;
-        ELSE
-            DBMS_OUTPUT.PUT_LINE('Все таблицы из ' || source_schema || ' присутствуют в ' || target_schema || '.');
-        END IF;
-    END compare_and_generate_ddl;
+  FUNCTION replace_schema(p_ddl IN CLOB) RETURN CLOB IS
+  BEGIN
+    RETURN REPLACE(p_ddl, '"' || UPPER(p_dev_schema) || '"', '"' || UPPER(p_prod_schema) || '"');
+  END replace_schema;
 
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('Таблицы, которые есть в DEV_SCHEMA, но отсутствуют в PROD_SCHEMA:');
-    compare_and_generate_ddl(dev_schema_name, prod_schema_name, 'CREATE');
-    
-    DBMS_OUTPUT.PUT_LINE('Таблицы, которые есть в PROD_SCHEMA, но отсутствуют в DEV_SCHEMA:');
-    compare_and_generate_ddl(prod_schema_name, dev_schema_name, 'DROP');
+  DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'STORAGE', FALSE);
+  DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', FALSE);
+  DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'CONSTRAINTS', FALSE);
+  DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', FALSE);
+  DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'PRETTY', FALSE);
+  DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'OID', FALSE);
 
-    RETURN v_table_differences;
-END compare_tables;
-
-
-CREATE OR REPLACE FUNCTION compare_table_structure(
-    dev_schema_name IN VARCHAR2,
-    prod_schema_name IN VARCHAR2,
-    v_ddl_commands IN OUT CLOB_LIST
-) RETURN BOOLEAN IS
-    v_has_differences BOOLEAN := FALSE;
-    v_any_differences BOOLEAN := FALSE;
-
-    PROCEDURE log_difference(table_name IN VARCHAR2, message IN VARCHAR2) IS
-    BEGIN
-        IF NOT v_has_differences THEN
-            DBMS_OUTPUT.PUT_LINE('Таблица ' || table_name || ' в DEV_SCHEMA и PROD_SCHEMA отличается:');
-            v_has_differences := TRUE;
-            v_any_differences := TRUE;
-        END IF;
-        DBMS_OUTPUT.PUT_LINE('  - ' || message);
-    END log_difference;
-
-    PROCEDURE add_ddl_command(command IN VARCHAR2) IS
-    BEGIN
-        v_ddl_commands.EXTEND;
-        v_ddl_commands(v_ddl_commands.COUNT) := command;
-    END add_ddl_command;
-BEGIN
-    FOR r_table IN (
-        SELECT TABLE_NAME
-        FROM ALL_TABLES
-        WHERE OWNER = dev_schema_name
-          AND TABLE_NAME IN (
-              SELECT TABLE_NAME
-              FROM ALL_TABLES
-              WHERE OWNER = prod_schema_name
-          )
-    ) LOOP
-        v_has_differences := FALSE;
-
-        FOR r_column IN (
-            SELECT column_name, data_type, data_length, 'ADD' as action
-            FROM ALL_TAB_COLUMNS
-            WHERE OWNER = dev_schema_name AND table_name = r_table.TABLE_NAME
-            MINUS
-            SELECT column_name, data_type, data_length, 'ADD'
-            FROM ALL_TAB_COLUMNS
-            WHERE OWNER = prod_schema_name AND table_name = r_table.TABLE_NAME
-
-            UNION ALL
-
-            SELECT column_name, NULL, NULL, 'DROP'
-            FROM ALL_TAB_COLUMNS
-            WHERE OWNER = prod_schema_name AND table_name = r_table.TABLE_NAME
-            MINUS
-            SELECT column_name, NULL, NULL, 'DROP'
-            FROM ALL_TAB_COLUMNS
-            WHERE OWNER = dev_schema_name AND table_name = r_table.TABLE_NAME
-
-            UNION ALL
-
-            SELECT dev.column_name, dev.data_type, dev.data_length, 'MODIFY'
-            FROM ALL_TAB_COLUMNS dev
-            JOIN ALL_TAB_COLUMNS prod ON dev.column_name = prod.column_name
-            WHERE dev.OWNER = dev_schema_name
-              AND prod.OWNER = prod_schema_name
-              AND dev.table_name = r_table.TABLE_NAME
-              AND prod.table_name = r_table.TABLE_NAME
-              AND (dev.data_type != prod.data_type OR dev.data_length != prod.data_length)
-        ) LOOP
-            IF r_column.action = 'ADD' THEN
-                log_difference(r_table.TABLE_NAME, 'Столбец ' || r_column.column_name || ' есть в DEV_SCHEMA но отсутствует в PROD_SCHEMA.');
-                add_ddl_command('ALTER TABLE ' || prod_schema_name || '.' || r_table.TABLE_NAME ||
-                                ' ADD ' || r_column.column_name || ' ' || r_column.data_type ||
-                                '(' || r_column.data_length || ');');
-
-            ELSIF r_column.action = 'DROP' THEN
-                log_difference(r_table.TABLE_NAME, 'Столбец ' || r_column.column_name || ' есть в PROD_SCHEMA но отсутствует в DEV_SCHEMA.');
-                add_ddl_command('ALTER TABLE ' || prod_schema_name || '.' || r_table.TABLE_NAME ||
-                                ' DROP COLUMN ' || r_column.column_name || ';');
-
-            ELSIF r_column.action = 'MODIFY' THEN
-                log_difference(r_table.TABLE_NAME, 'Столбец ' || r_column.column_name || ' отличается.');
-                add_ddl_command('ALTER TABLE ' || prod_schema_name || '.' || r_table.TABLE_NAME ||
-                                ' MODIFY ' || r_column.column_name || ' ' || r_column.data_type ||
-                                '(' || r_column.data_length || ');');
-            END IF;
-        END LOOP;
-    END LOOP;
-
-    IF NOT v_any_differences THEN
-        DBMS_OUTPUT.PUT_LINE('Отличий в структуре таблиц между DEV_SCHEMA и PROD_SCHEMA не обнаружено.');
-    END IF;
-
-    RETURN v_any_differences;
-END compare_table_structure;
-
-CREATE OR REPLACE PROCEDURE add_constraints(
-    dev_schema_name IN VARCHAR2,
-    prod_schema_name IN VARCHAR2,
-    v_ddl_commands IN OUT CLOB_LIST
-) IS
-    PROCEDURE add_command(command IN VARCHAR2) IS
-    BEGIN
-        v_ddl_commands.EXTEND;
-        v_ddl_commands(v_ddl_commands.COUNT) := command;
-    END add_command;
-BEGIN
-    FOR r_table IN (
-        SELECT TABLE_NAME 
-        FROM ALL_TABLES 
-        WHERE OWNER = dev_schema_name
-        AND TABLE_NAME NOT IN (
-            SELECT TABLE_NAME 
-            FROM ALL_TABLES 
-            WHERE OWNER = prod_schema_name
-        )
-    ) LOOP
-        FOR r_constraint IN (
-            SELECT ac.constraint_name, acc.column_name,
-                   CASE ac.constraint_type 
-                       WHEN 'P' THEN 'PRIMARY KEY'
-                       WHEN 'U' THEN 'UNIQUE'
-                   END AS constraint_type,
-                   NULL AS referenced_table,
-                   NULL AS referenced_column
-            FROM ALL_CONSTRAINTS ac
-            JOIN ALL_CONS_COLUMNS acc ON ac.constraint_name = acc.constraint_name
-            WHERE ac.OWNER = dev_schema_name
-              AND ac.table_name = r_table.TABLE_NAME
-              AND ac.constraint_type IN ('P', 'U')
-
-            UNION ALL
-
-            SELECT a.constraint_name, acc.column_name, 
-                   'FOREIGN KEY' AS constraint_type,
-                   c.table_name AS referenced_table,
-                   c.column_name AS referenced_column
-            FROM ALL_CONSTRAINTS a
-            JOIN ALL_CONS_COLUMNS acc ON a.constraint_name = acc.constraint_name
-            JOIN ALL_CONS_COLUMNS c ON a.r_constraint_name = c.constraint_name
-            WHERE a.OWNER = dev_schema_name
-              AND a.table_name = r_table.TABLE_NAME
-              AND a.constraint_type = 'R'
-        ) LOOP
-            IF r_constraint.constraint_type = 'FOREIGN KEY' THEN
-                add_command('ALTER TABLE ' || prod_schema_name || '.' || r_table.TABLE_NAME || 
-                            ' ADD CONSTRAINT ' || r_constraint.constraint_name || 
-                            ' FOREIGN KEY (' || r_constraint.column_name || 
-                            ') REFERENCES ' || prod_schema_name || '.' || 
-                            r_constraint.referenced_table || '(' || r_constraint.referenced_column || ');');
-            ELSE
-                add_command('ALTER TABLE ' || prod_schema_name || '.' || r_table.TABLE_NAME || 
-                            ' ADD CONSTRAINT ' || r_constraint.constraint_name || 
-                            ' ' || r_constraint.constraint_type || 
-                            ' (' || r_constraint.column_name || ');');
-            END IF;
-        END LOOP;
-    END LOOP;
-END add_constraints;
-
-CREATE OR REPLACE PROCEDURE compare_functions_and_procedures(
-    dev_schema_name IN VARCHAR2,
-    prod_schema_name IN VARCHAR2,
-    v_ddl_commands IN OUT CLOB_LIST
-) IS
-    v_dev_code CLOB; 
-    v_prod_code CLOB; 
-    v_has_diff BOOLEAN := FALSE;
-BEGIN
-    FOR dev_only IN (
-        SELECT object_name, object_type
-        FROM all_objects
-        WHERE (object_type = 'FUNCTION' OR object_type = 'PROCEDURE')
-        AND owner = UPPER(dev_schema_name)
-        AND object_name NOT IN (
-            SELECT object_name
-            FROM all_objects
-            WHERE (object_type = 'FUNCTION' OR object_type = 'PROCEDURE')
-            AND owner = UPPER(prod_schema_name)
-        )
-    ) LOOP
-        IF NOT v_has_diff THEN
-            DBMS_OUTPUT.PUT_LINE('Функции и процедуры, которые есть в ' || UPPER(dev_schema_name) || ', но отсутствуют в ' || UPPER(prod_schema_name) || ':');
-            v_has_diff := TRUE;
-        END IF;
-
-        get_plsql_procs_and_funcs(dev_schema_name, dev_only.object_name, v_dev_code);
-
-        IF v_dev_code LIKE 'PROCEDURE%' THEN
-            v_dev_code := SUBSTR(v_dev_code, INSTR(v_dev_code, 'IS') + 2); 
-        ELSIF v_dev_code LIKE 'FUNCTION%' THEN
-            v_dev_code := SUBSTR(v_dev_code, INSTR(v_dev_code, 'IS') + 2);  
-        END IF;
-
-        v_ddl_commands.EXTEND;
-        v_ddl_commands(v_ddl_commands.COUNT) := '';  
-        v_ddl_commands.EXTEND;
-        v_ddl_commands(v_ddl_commands.COUNT) := '';  
-        v_ddl_commands.EXTEND;
-        v_ddl_commands(v_ddl_commands.COUNT) := 'CREATE OR REPLACE ' || dev_only.object_type || ' ' || prod_schema_name || '.' || dev_only.object_name || ' AS ' || v_dev_code;
-
-        DBMS_OUTPUT.PUT_LINE('  - ' || dev_only.object_name);
-    END LOOP;
-
-
-    FOR prod_only IN (
-        SELECT object_name, object_type
-        FROM all_objects
-        WHERE (object_type = 'FUNCTION' OR object_type = 'PROCEDURE')
-        AND owner = UPPER(prod_schema_name)
-        AND object_name NOT IN (
-            SELECT object_name
-            FROM all_objects
-            WHERE (object_type = 'FUNCTION' OR object_type = 'PROCEDURE')
-            AND owner = UPPER(dev_schema_name)
-        )
-    ) LOOP
-        IF NOT v_has_diff THEN
-            DBMS_OUTPUT.PUT_LINE('Функции и процедуры, которые есть в ' || UPPER(prod_schema_name) || ', но отсутствуют в ' || UPPER(dev_schema_name) || ':');
-            v_has_diff := TRUE;
-        END IF;
-
-        v_ddl_commands.EXTEND;
-        v_ddl_commands(v_ddl_commands.COUNT) := '';
-        v_ddl_commands.EXTEND;
-        v_ddl_commands(v_ddl_commands.COUNT) := '';
-        v_ddl_commands.EXTEND;
-        v_ddl_commands(v_ddl_commands.COUNT) := 'DROP ' || prod_only.object_type || ' ' || prod_schema_name || '.' || prod_only.object_name;
-
-        DBMS_OUTPUT.PUT_LINE('  - ' || prod_only.object_name);
-    END LOOP;
-
-
-   FOR common_obj IN (
-        SELECT dev.object_name, dev.object_type
-        FROM all_objects dev
-        JOIN all_objects prod
-        ON dev.object_name = prod.object_name
-        AND dev.object_type = prod.object_type
-        WHERE (dev.object_type = 'FUNCTION' OR dev.object_type = 'PROCEDURE')
-        AND dev.owner = UPPER(dev_schema_name)
-        AND prod.owner = UPPER(prod_schema_name)
-    ) LOOP
-        get_plsql_procs_and_funcs(dev_schema_name, common_obj.object_name, v_dev_code);
-        get_plsql_procs_and_funcs(prod_schema_name, common_obj.object_name, v_prod_code);
-
-        IF v_dev_code <> v_prod_code THEN
-            IF NOT v_has_diff THEN
-                DBMS_OUTPUT.PUT_LINE('Функции и процедуры, которые отличаются между ' || UPPER(dev_schema_name) || ' и ' || UPPER(prod_schema_name) || ':');
-                v_has_diff := TRUE;
-            END IF;
-
-            IF v_dev_code LIKE 'PROCEDURE%' OR v_dev_code LIKE 'FUNCTION%' THEN
-                IF INSTR(v_dev_code, 'IS') > 0 THEN
-                    v_dev_code := SUBSTR(v_dev_code, INSTR(v_dev_code, 'IS') + 2);
-                ELSIF INSTR(v_dev_code, 'AS') > 0 THEN
-                    v_dev_code := SUBSTR(v_dev_code, INSTR(v_dev_code, 'AS') + 2);
-                END IF;
-            END IF;
-
-            v_ddl_commands.EXTEND;
-            v_ddl_commands(v_ddl_commands.COUNT) := '';
-            v_ddl_commands.EXTEND;
-            v_ddl_commands(v_ddl_commands.COUNT) := ''; 
-            v_ddl_commands.EXTEND;
-            v_ddl_commands(v_ddl_commands.COUNT) := 'CREATE OR REPLACE ' || common_obj.object_type || ' ' || prod_schema_name || '.' || common_obj.object_name || ' AS ' || v_dev_code;
-
-            DBMS_OUTPUT.PUT_LINE('  - ' || common_obj.object_name);
-        END IF;
-    END LOOP;
-
-
-    IF NOT v_has_diff THEN
-        DBMS_OUTPUT.PUT_LINE('Функции и процедуры в схемах ' || UPPER(dev_schema_name) || ' и ' || UPPER(prod_schema_name) || ' совпадают.');
-    END IF;
-END compare_functions_and_procedures;
-
-
-CREATE OR REPLACE PROCEDURE get_plsql_procs_and_funcs(
-  p_schema_name IN VARCHAR2, 
-  p_object_name IN VARCHAR2, 
-  p_code OUT VARCHAR2
-) IS
-  v_code VARCHAR2(32767);
-BEGIN
-  v_code := '';
-
-  FOR r IN (
-    SELECT object_name, object_type
-    FROM all_objects
-    WHERE (object_type = 'FUNCTION' OR object_type = 'PROCEDURE')
-    AND owner = UPPER(p_schema_name)
-    AND object_name = UPPER(p_object_name)
+  FOR rec IN (
+    SELECT dt.table_name,
+           CASE
+             WHEN pt.table_name IS NULL THEN 'MISSING'
+             WHEN (SELECT COUNT(*) FROM (
+                      SELECT column_name, data_type, data_length, nullable
+                      FROM all_tab_columns
+                      WHERE owner = UPPER(p_dev_schema)
+                        AND table_name = dt.table_name
+                      MINUS
+                      SELECT column_name, data_type, data_length, nullable
+                      FROM all_tab_columns
+                      WHERE owner = UPPER(p_prod_schema)
+                        AND table_name = dt.table_name
+                   )) > 0 THEN 'DIFF'
+           END AS issue
+    FROM (SELECT table_name FROM all_tables WHERE owner = UPPER(p_dev_schema)) dt
+    LEFT JOIN (SELECT table_name FROM all_tables WHERE owner = UPPER(p_prod_schema)) pt
+      ON dt.table_name = pt.table_name
+    WHERE pt.table_name IS NULL OR
+          ((SELECT COUNT(*) FROM (
+              SELECT column_name, data_type, data_length, nullable
+              FROM all_tab_columns
+              WHERE owner = UPPER(p_dev_schema)
+                AND table_name = dt.table_name
+              MINUS
+              SELECT column_name, data_type, data_length, nullable
+              FROM all_tab_columns
+              WHERE owner = UPPER(p_prod_schema)
+                AND table_name = dt.table_name
+            )) > 0)
   ) LOOP
-    FOR proc_func IN (
-      SELECT text AS text 
-      FROM all_source
-      WHERE owner = UPPER(p_schema_name)
-      AND name = r.object_name
-      ORDER BY line
-    ) LOOP
-      DECLARE
-        v_text VARCHAR2(32767);
-      BEGIN
-        v_text := TRIM(TRIM(CHR(10) FROM proc_func.text)); 
-        IF LENGTH(v_text) > 0 THEN
-           v_text := REGEXP_REPLACE(v_text, '\s+', ' ');
-           v_code := v_code || v_text || CHR(10);
-        END IF;
-      END;
-    END LOOP;
+    v_affected_tables.EXTEND;
+    v_affected_tables(v_affected_tables.COUNT) := rec.table_name;
+    v_issue_map(rec.table_name) := rec.issue;
   END LOOP;
 
-  p_code := v_code;
-END get_plsql_procs_and_funcs;
+  FOR i IN 1 .. v_affected_tables.COUNT LOOP
+    v_dep_count(v_affected_tables(i)) := 0;
+    v_children(v_affected_tables(i)) := t_varchar_table();
+  END LOOP;
 
-CREATE OR REPLACE PROCEDURE compare_indexes(
-    dev_schema_name IN VARCHAR2,
-    prod_schema_name IN VARCHAR2,
-    ddl_commands IN OUT CLOB_LIST
-) IS
-    v_has_index_differences BOOLEAN := FALSE;
-BEGIN
-    FOR r_index IN (
-        SELECT i.INDEX_NAME, i.TABLE_NAME, LISTAGG(c.COLUMN_NAME, ', ') WITHIN GROUP (ORDER BY c.COLUMN_POSITION) AS COLUMN_LIST
-        FROM ALL_INDEXES i
-        JOIN ALL_IND_COLUMNS c ON i.INDEX_NAME = c.INDEX_NAME AND i.TABLE_NAME = c.TABLE_NAME AND i.OWNER = c.INDEX_OWNER
-        WHERE i.OWNER = dev_schema_name
-        AND i.TABLE_NAME IN (
-            SELECT TABLE_NAME
-            FROM ALL_TABLES
-            WHERE OWNER = prod_schema_name
-        )
-        AND i.INDEX_NAME NOT IN (
-            SELECT INDEX_NAME
-            FROM ALL_INDEXES
-            WHERE OWNER = prod_schema_name
-        )
-        GROUP BY i.INDEX_NAME, i.TABLE_NAME
-    ) LOOP
-        IF NOT v_has_index_differences THEN
-            v_has_index_differences := TRUE;
-        END IF;
-        DBMS_OUTPUT.PUT_LINE('Индекс ' || r_index.INDEX_NAME || ' есть в DEV_SCHEMA, но отсутствует в PROD_SCHEMA.');
-        ddl_commands.EXTEND;
-        ddl_commands(ddl_commands.COUNT) := 'CREATE INDEX ' || prod_schema_name || '.' || r_index.INDEX_NAME || ' ON ' || prod_schema_name || '.' || r_index.TABLE_NAME || '(' || r_index.COLUMN_LIST || ');';
-    END LOOP;
-
-    FOR r_index IN (
-        SELECT i.INDEX_NAME, i.TABLE_NAME, LISTAGG(c.COLUMN_NAME, ', ') WITHIN GROUP (ORDER BY c.COLUMN_POSITION) AS COLUMN_LIST
-        FROM ALL_INDEXES i
-        JOIN ALL_IND_COLUMNS c ON i.INDEX_NAME = c.INDEX_NAME AND i.TABLE_NAME = c.TABLE_NAME AND i.OWNER = c.INDEX_OWNER
-        WHERE i.OWNER = prod_schema_name
-        AND i.TABLE_NAME IN (
-            SELECT TABLE_NAME
-            FROM ALL_TABLES
-            WHERE OWNER = dev_schema_name
-        )
-        AND i.INDEX_NAME NOT IN (
-            SELECT INDEX_NAME
-            FROM ALL_INDEXES
-            WHERE OWNER = dev_schema_name
-        )
-        GROUP BY i.INDEX_NAME, i.TABLE_NAME
-    ) LOOP
-        IF NOT v_has_index_differences THEN
-            v_has_index_differences := TRUE;
-        END IF;
-        DBMS_OUTPUT.PUT_LINE('Индекс ' || r_index.INDEX_NAME || ' есть в PROD_SCHEMA, но отсутствует в DEV_SCHEMA.');
-        ddl_commands.EXTEND;
-        ddl_commands(ddl_commands.COUNT) := 'DROP INDEX ' || prod_schema_name || '.' || r_index.INDEX_NAME || ';';
-    END LOOP;
-
-    IF NOT v_has_index_differences THEN
-        DBMS_OUTPUT.PUT_LINE('Отличий в индексах между DEV_SCHEMA и PROD_SCHEMA не обнаружено.');
-    END IF;
-END compare_indexes;
-
-CREATE OR REPLACE PROCEDURE compare_packages(
-    dev_schema_name IN VARCHAR2,
-    prod_schema_name IN VARCHAR2,
-    ddl_commands IN OUT CLOB_LIST
-) IS
-    v_has_package_differences BOOLEAN := FALSE;
-BEGIN
-    FOR r_package IN (
-        SELECT OBJECT_NAME
-        FROM ALL_OBJECTS
-        WHERE OWNER = dev_schema_name
-          AND OBJECT_TYPE = 'PACKAGE'
-          AND OBJECT_NAME NOT IN (
-              SELECT OBJECT_NAME
-              FROM ALL_OBJECTS
-              WHERE OWNER = prod_schema_name
-                AND OBJECT_TYPE = 'PACKAGE'
-          )
-    ) LOOP
-        IF NOT v_has_package_differences THEN
-            v_has_package_differences := TRUE;
-        END IF;
-        DBMS_OUTPUT.PUT_LINE('Пакет ' || r_package.OBJECT_NAME || ' есть в DEV_SCHEMA, но отсутствует в PROD_SCHEMA.');
-        ddl_commands.EXTEND;
-        ddl_commands(ddl_commands.COUNT) := 'CREATE OR REPLACE PACKAGE ' || prod_schema_name || '.' || r_package.OBJECT_NAME || ' AS <код_пакета>;';
-    END LOOP;
-
-    FOR r_package IN (
-        SELECT OBJECT_NAME
-        FROM ALL_OBJECTS
-        WHERE OWNER = prod_schema_name
-          AND OBJECT_TYPE = 'PACKAGE'
-          AND OBJECT_NAME NOT IN (
-              SELECT OBJECT_NAME
-              FROM ALL_OBJECTS
-              WHERE OWNER = dev_schema_name
-                AND OBJECT_TYPE = 'PACKAGE'
-          )
-    ) LOOP
-        IF NOT v_has_package_differences THEN
-            v_has_package_differences := TRUE;
-        END IF;
-        DBMS_OUTPUT.PUT_LINE('Пакет ' || r_package.OBJECT_NAME || ' есть в PROD_SCHEMA, но отсутствует в DEV_SCHEMA.');
-        ddl_commands.EXTEND;
-        ddl_commands(ddl_commands.COUNT) := 'DROP PACKAGE ' || prod_schema_name || '.' || r_package.OBJECT_NAME || ';';
-    END LOOP;
-
-    IF NOT v_has_package_differences THEN
-        DBMS_OUTPUT.PUT_LINE('Отличий в пакетах между DEV_SCHEMA и PROD_SCHEMA не обнаружено.');
-    END IF;
-END compare_packages;
-
-CREATE OR REPLACE PROCEDURE determine_table_creation_order(
-    dev_schema_name IN VARCHAR2,
-    prod_schema_name IN VARCHAR2
-) IS
-    TYPE table_name_array IS TABLE OF VARCHAR2(30);
-    v_independent_tables table_name_array := table_name_array(); 
-    v_dependent_tables table_name_array := table_name_array();
-    v_non_circular_dependent_tables table_name_array := table_name_array();
-    v_circular_tables table_name_array := table_name_array(); 
-    v_is_circular BOOLEAN;
-
-    TYPE cycle_pair IS RECORD (
-        table1 VARCHAR2(30),
-        table2 VARCHAR2(30)
-    );
-    TYPE cycle_list IS TABLE OF cycle_pair;
-    v_cycles cycle_list := cycle_list();
-
-    TYPE dependency_pair IS RECORD (
-        child_table VARCHAR2(30),
-        parent_table VARCHAR2(30)
-    );
-    TYPE dependency_list IS TABLE OF dependency_pair;
-    v_dependencies dependency_list := dependency_list();
-
-    PROCEDURE topological_dfs(
-        table_name IN VARCHAR2,
-        dependencies IN dependency_list,
-        visited IN OUT table_name_array,
-        sorted IN OUT table_name_array
-    ) IS
-    BEGIN
-        visited.EXTEND;
-        visited(visited.COUNT) := table_name;
-
-        FOR i IN 1 .. dependencies.COUNT LOOP
-            IF dependencies(i).child_table = table_name AND NOT dependencies(i).parent_table MEMBER OF visited THEN
-                topological_dfs(dependencies(i).parent_table, dependencies, visited, sorted);
-            END IF;
-        END LOOP;
-
-        sorted.EXTEND;
-        sorted(sorted.COUNT) := table_name;
-    END topological_dfs;
-
-    FUNCTION topological_sort(tables IN table_name_array, dependencies IN dependency_list)
-    RETURN table_name_array IS
-        v_sorted table_name_array := table_name_array();
-        v_visited table_name_array := table_name_array();
-        v_temp table_name_array;
-    BEGIN
-        FOR i IN 1 .. tables.COUNT LOOP
-            IF NOT tables(i) MEMBER OF v_visited THEN
-                v_temp := table_name_array();
-                topological_dfs(tables(i), dependencies, v_visited, v_temp);
-                v_sorted := v_sorted MULTISET UNION v_temp;
-            END IF;
-        END LOOP;
-        RETURN v_sorted;
-    END topological_sort;
-BEGIN
-    SELECT table_name BULK COLLECT INTO v_independent_tables
+  FOR i IN 1 .. v_affected_tables.COUNT LOOP
+    v_table_name := v_affected_tables(i);
+    SELECT COUNT(*) INTO v_count
     FROM all_tables
-    WHERE owner = dev_schema_name
-    AND table_name NOT IN (
-        SELECT a.table_name
+    WHERE owner = UPPER(p_prod_schema)
+      AND table_name = v_table_name;
+    DECLARE
+      v_schema_for_fk VARCHAR2(30);
+    BEGIN
+      IF v_count > 0 THEN
+        v_schema_for_fk := UPPER(p_prod_schema);
+      ELSE
+        v_schema_for_fk := UPPER(p_dev_schema);
+      END IF;
+      FOR fk_rec IN (
+        SELECT a.table_name AS child, c.table_name AS parent
         FROM all_constraints a
-        WHERE a.owner = dev_schema_name
-            AND a.constraint_type = 'R'
-    )
-    AND table_name NOT IN (
-        SELECT c.table_name
-        FROM all_constraints c
-        WHERE c.owner = dev_schema_name
-            AND c.constraint_type = 'P'
-    )
-    AND table_name NOT IN (
-        SELECT table_name
-        FROM all_tables
-        WHERE owner = prod_schema_name
-    );
-
-    SELECT table_name BULK COLLECT INTO v_dependent_tables
-    FROM all_tables
-    WHERE owner = dev_schema_name
-    AND (
-        table_name IN (
-            SELECT a.table_name
-            FROM all_constraints a
-            WHERE a.owner = dev_schema_name
-                AND a.constraint_type = 'R'
-        )
-        OR table_name IN (
-            SELECT c.table_name
-            FROM all_constraints c
-            WHERE c.owner = dev_schema_name
-                AND c.constraint_type = 'P'
-        )
-    )
-    AND table_name NOT IN (
-        SELECT table_name
-        FROM all_tables
-        WHERE owner = prod_schema_name
-    );
-
-    IF v_independent_tables.COUNT = 0 AND v_dependent_tables.COUNT = 0 THEN
-        DBMS_OUTPUT.PUT_LINE('Нет таблиц для создания: все таблицы из DEV_SCHEMA уже присутствуют в PROD_SCHEMA.');
-        RETURN;
-    END IF;
-
-    SELECT a.table_name AS child_table, c.table_name AS parent_table
-    BULK COLLECT INTO v_dependencies
-    FROM all_constraints a
-    JOIN all_constraints c ON a.r_constraint_name = c.constraint_name
-    WHERE a.owner = dev_schema_name
-    AND c.owner = dev_schema_name
-    AND a.constraint_type = 'R'
-    AND a.table_name NOT IN (SELECT table_name FROM all_tables WHERE owner = prod_schema_name)
-    AND c.table_name NOT IN (SELECT table_name FROM all_tables WHERE owner = prod_schema_name);
-
-    WITH cycle_detection AS (
-        SELECT a.table_name AS child_table, c.table_name AS parent_table
-        FROM all_constraints a
-        JOIN all_constraints c ON a.r_constraint_name = c.constraint_name
-        WHERE a.owner = dev_schema_name
-        AND c.owner = dev_schema_name
-        AND a.constraint_type = 'R'
-        AND a.table_name NOT IN (SELECT table_name FROM all_tables WHERE owner = prod_schema_name)
-        AND c.table_name NOT IN (SELECT table_name FROM all_tables WHERE owner = prod_schema_name)
-    )
-    SELECT child_table, parent_table
-    BULK COLLECT INTO v_cycles
-    FROM cycle_detection d1
-    WHERE EXISTS (
-        SELECT 1 FROM cycle_detection d2
-        WHERE d1.child_table = d2.parent_table 
-        AND d1.parent_table = d2.child_table
-    );
-
-    FOR i IN 1 .. v_dependent_tables.COUNT LOOP
-        v_is_circular := FALSE;
-        FOR j IN 1 .. v_cycles.COUNT LOOP
-            IF v_dependent_tables(i) = v_cycles(j).table1 OR v_dependent_tables(i) = v_cycles(j).table2 THEN
-                v_is_circular := TRUE;
-                EXIT;
-            END IF;
+        JOIN all_constraints c ON a.r_constraint_name = c.constraint_name AND a.owner = c.owner
+        WHERE a.constraint_type = 'R'
+          AND a.owner = v_schema_for_fk
+          AND a.table_name = v_table_name
+      ) LOOP
+        FOR j IN 1 .. v_affected_tables.COUNT LOOP
+          IF fk_rec.parent = v_affected_tables(j) THEN
+            v_dep_count(v_table_name) := v_dep_count(v_table_name) + 1;
+            v_children(fk_rec.parent).EXTEND;
+            v_children(fk_rec.parent)(v_children(fk_rec.parent).COUNT) := v_table_name;
+          END IF;
         END LOOP;
+      END LOOP;
+    END;
+  END LOOP;
 
-        IF v_is_circular THEN
-            v_circular_tables.EXTEND;
-            v_circular_tables(v_circular_tables.COUNT) := v_dependent_tables(i);
-        ELSE
-            v_non_circular_dependent_tables.EXTEND;
-            v_non_circular_dependent_tables(v_non_circular_dependent_tables.COUNT) := v_dependent_tables(i);
-        END IF;
+  DECLARE
+    TYPE t_queue IS TABLE OF VARCHAR2(128);
+    v_queue t_queue := t_queue();
+    v_queue_start PLS_INTEGER := 1;
+    v_queue_end   PLS_INTEGER := 0;
+  BEGIN
+    FOR i IN 1 .. v_affected_tables.COUNT LOOP
+      IF v_dep_count(v_affected_tables(i)) = 0 THEN
+        v_queue_end := v_queue_end + 1;
+        v_queue.EXTEND;
+        v_queue(v_queue_end) := v_affected_tables(i);
+      END IF;
     END LOOP;
-
-    v_non_circular_dependent_tables := topological_sort(v_non_circular_dependent_tables, v_dependencies);
-
-    IF v_independent_tables.COUNT > 0 THEN
-        DBMS_OUTPUT.PUT_LINE('Таблицы без зависимостей (могут быть созданы в любом порядке):');
-        FOR i IN 1 .. v_independent_tables.COUNT LOOP
-            DBMS_OUTPUT.PUT_LINE('  - ' || v_independent_tables(i));
+    WHILE v_queue_start <= v_queue_end LOOP
+      DECLARE
+        v_current VARCHAR2(128);
+      BEGIN
+        v_current := v_queue(v_queue_start);
+        v_queue_start := v_queue_start + 1;
+        v_sorted_count := v_sorted_count + 1;
+        v_sorted.EXTEND;
+        v_sorted(v_sorted_count) := v_current;
+        FOR i IN 1 .. v_children(v_current).COUNT LOOP
+          DECLARE
+            v_child VARCHAR2(128) := v_children(v_current)(i);
+          BEGIN
+            v_dep_count(v_child) := v_dep_count(v_child) - 1;
+            IF v_dep_count(v_child) = 0 THEN
+              v_queue_end := v_queue_end + 1;
+              v_queue.EXTEND;
+              v_queue(v_queue_end) := v_child;
+            END IF;
+          END;
         END LOOP;
+      END;
+    END LOOP;
+    IF v_sorted_count < v_affected_tables.COUNT THEN
+      FOR i IN 1 .. v_affected_tables.COUNT LOOP
+        IF v_dep_count(v_affected_tables(i)) > 0 THEN
+          v_sorted_count := v_sorted_count + 1;
+          v_sorted.EXTEND;
+          v_sorted(v_sorted_count) := v_affected_tables(i);
+        END IF;
+      END LOOP;
     END IF;
+  END;
 
-    IF v_non_circular_dependent_tables.COUNT > 0 THEN
-        DBMS_OUTPUT.PUT_LINE('Таблицы с зависимостями (порядок создания важен):');
-        FOR i IN 1 .. v_non_circular_dependent_tables.COUNT LOOP
-            DBMS_OUTPUT.PUT_LINE('  - ' || v_non_circular_dependent_tables(i));
+  DBMS_OUTPUT.PUT_LINE('Перечень таблиц (либо отсутствуют в PROD, либо отличаются по структуре),');
+  DBMS_OUTPUT.PUT_LINE('отсортированные по порядку создания:');
+  FOR i IN 1 .. v_sorted_count LOOP
+    DBMS_OUTPUT.PUT_LINE('  ' || v_sorted(i));
+  END LOOP;
+
+  DECLARE
+    TYPE t_varchar_table_all IS TABLE OF VARCHAR2(128);
+    v_all_tables_prod t_varchar_table_all := t_varchar_table_all();
+    TYPE t_dep_count_map_all IS TABLE OF NUMBER INDEX BY VARCHAR2(128);
+    v_all_dep_count_prod t_dep_count_map_all;
+    TYPE t_children_map_all IS TABLE OF t_varchar_table_all INDEX BY VARCHAR2(128);
+    v_all_children_prod t_children_map_all;
+    v_all_sorted_count_prod PLS_INTEGER := 0;
+  BEGIN
+    FOR rec IN (SELECT table_name FROM all_tables WHERE owner = UPPER(p_prod_schema)) LOOP
+      v_all_tables_prod.EXTEND;
+      v_all_tables_prod(v_all_tables_prod.COUNT) := rec.table_name;
+      v_all_dep_count_prod(rec.table_name) := 0;
+      v_all_children_prod(rec.table_name) := t_varchar_table_all();
+    END LOOP;
+    FOR i IN 1 .. v_all_tables_prod.COUNT LOOP
+      FOR fk_rec IN (
+        SELECT a.table_name AS child, c.table_name AS parent
+        FROM all_constraints a
+        JOIN all_constraints c ON a.r_constraint_name = c.constraint_name AND a.owner = c.owner
+        WHERE a.constraint_type = 'R'
+          AND a.owner = UPPER(p_prod_schema)
+          AND a.table_name = v_all_tables_prod(i)
+      ) LOOP
+        FOR j IN 1 .. v_all_tables_prod.COUNT LOOP
+          IF fk_rec.parent = v_all_tables_prod(j) THEN
+            v_all_dep_count_prod(v_all_tables_prod(i)) :=
+              v_all_dep_count_prod(v_all_tables_prod(i)) + 1;
+            v_all_children_prod(fk_rec.parent).EXTEND;
+            v_all_children_prod(fk_rec.parent)(v_all_children_prod(fk_rec.parent).COUNT) :=
+              v_all_tables_prod(i);
+          END IF;
         END LOOP;
-    END IF;
+      END LOOP;
+    END LOOP;
+    DECLARE
+      TYPE t_queue_all IS TABLE OF VARCHAR2(128);
+      v_queue_all t_queue_all := t_queue_all();
+      v_queue_all_start PLS_INTEGER := 1;
+      v_queue_all_end   PLS_INTEGER := 0;
+    BEGIN
+      FOR i IN 1 .. v_all_tables_prod.COUNT LOOP
+        IF v_all_dep_count_prod(v_all_tables_prod(i)) = 0 THEN
+          v_queue_all_end := v_queue_all_end + 1;
+          v_queue_all.EXTEND;
+          v_queue_all(v_queue_all_end) := v_all_tables_prod(i);
+        END IF;
+      END LOOP;
+      WHILE v_queue_all_start <= v_queue_all_end LOOP
+        DECLARE
+          v_current VARCHAR2(128);
+        BEGIN
+          v_current := v_queue_all(v_queue_all_start);
+          v_queue_all_start := v_queue_all_start + 1;
+          v_all_sorted_count_prod := v_all_sorted_count_prod + 1;
+          FOR i IN 1 .. v_all_children_prod(v_current).COUNT LOOP
+            DECLARE
+              v_child VARCHAR2(128) := v_all_children_prod(v_current)(i);
+            BEGIN
+              v_all_dep_count_prod(v_child) := v_all_dep_count_prod(v_child) - 1;
+              IF v_all_dep_count_prod(v_child) = 0 THEN
+                v_queue_all_end := v_queue_all_end + 1;
+                v_queue_all.EXTEND;
+                v_queue_all(v_queue_all_end) := v_child;
+              END IF;
+            END;
+          END LOOP;
+        END;
+      END LOOP;
+      IF v_all_sorted_count_prod < v_all_tables_prod.COUNT THEN
+        DBMS_OUTPUT.PUT_LINE('Циклические зависимости в PROD: есть');
+      ELSE
+        DBMS_OUTPUT.PUT_LINE('Циклические зависимости в PROD: нет');
+      END IF;
+    END;
+  END;
 
-    IF v_circular_tables.COUNT > 0 THEN
-        DBMS_OUTPUT.PUT_LINE('Обнаруженные циклические зависимости:');
-        FOR i IN 1 .. v_circular_tables.COUNT LOOP
-            DBMS_OUTPUT.PUT_LINE('  - ' || v_circular_tables(i));
+  DECLARE
+    TYPE t_varchar_table_all IS TABLE OF VARCHAR2(128);
+    v_all_tables_dev t_varchar_table_all := t_varchar_table_all();
+    TYPE t_dep_count_map_all IS TABLE OF NUMBER INDEX BY VARCHAR2(128);
+    v_all_dep_count_dev t_dep_count_map_all;
+    TYPE t_children_map_all IS TABLE OF t_varchar_table_all INDEX BY VARCHAR2(128);
+    v_all_children_dev t_children_map_all;
+    v_all_sorted_count_dev PLS_INTEGER := 0;
+  BEGIN
+    FOR rec IN (SELECT table_name FROM all_tables WHERE owner = UPPER(p_dev_schema)) LOOP
+      v_all_tables_dev.EXTEND;
+      v_all_tables_dev(v_all_tables_dev.COUNT) := rec.table_name;
+      v_all_dep_count_dev(rec.table_name) := 0;
+      v_all_children_dev(rec.table_name) := t_varchar_table_all();
+    END LOOP;
+    FOR i IN 1 .. v_all_tables_dev.COUNT LOOP
+      FOR fk_rec IN (
+        SELECT a.table_name AS child, c.table_name AS parent
+        FROM all_constraints a
+        JOIN all_constraints c ON a.r_constraint_name = c.constraint_name AND a.owner = c.owner
+        WHERE a.constraint_type = 'R'
+          AND a.owner = UPPER(p_dev_schema)
+          AND a.table_name = v_all_tables_dev(i)
+      ) LOOP
+        FOR j IN 1 .. v_all_tables_dev.COUNT LOOP
+          IF fk_rec.parent = v_all_tables_dev(j) THEN
+            v_all_dep_count_dev(v_all_tables_dev(i)) :=
+              v_all_dep_count_dev(v_all_tables_dev(i)) + 1;
+            v_all_children_dev(fk_rec.parent).EXTEND;
+            v_all_children_dev(fk_rec.parent)(v_all_children_dev(fk_rec.parent).COUNT) :=
+              v_all_tables_dev(i);
+          END IF;
         END LOOP;
+      END LOOP;
+    END LOOP;
+    DECLARE
+      TYPE t_queue_all IS TABLE OF VARCHAR2(128);
+      v_queue_all t_queue_all := t_queue_all();
+      v_queue_all_start PLS_INTEGER := 1;
+      v_queue_all_end   PLS_INTEGER := 0;
+    BEGIN
+      FOR i IN 1 .. v_all_tables_dev.COUNT LOOP
+        IF v_all_dep_count_dev(v_all_tables_dev(i)) = 0 THEN
+          v_queue_all_end := v_queue_all_end + 1;
+          v_queue_all.EXTEND;
+          v_queue_all(v_queue_all_end) := v_all_tables_dev(i);
+        END IF;
+      END LOOP;
+      WHILE v_queue_all_start <= v_queue_all_end LOOP
+        DECLARE
+          v_current VARCHAR2(128);
+        BEGIN
+          v_current := v_queue_all(v_queue_all_start);
+          v_queue_all_start := v_queue_all_start + 1;
+          v_all_sorted_count_dev := v_all_sorted_count_dev + 1;
+          FOR i IN 1 .. v_all_children_dev(v_current).COUNT LOOP
+            DECLARE
+              v_child VARCHAR2(128) := v_all_children_dev(v_current)(i);
+            BEGIN
+              v_all_dep_count_dev(v_child) := v_all_dep_count_dev(v_child) - 1;
+              IF v_all_dep_count_dev(v_child) = 0 THEN
+                v_queue_all_end := v_queue_all_end + 1;
+                v_queue_all.EXTEND;
+                v_queue_all(v_queue_all_end) := v_child;
+              END IF;
+            END;
+          END LOOP;
+        END;
+      END LOOP;
+      IF v_all_sorted_count_dev < v_all_tables_dev.COUNT THEN
+        DBMS_OUTPUT.PUT_LINE('Циклические зависимости в DEV: есть');
+      ELSE
+        DBMS_OUTPUT.PUT_LINE('Циклические зависимости в DEV: нет');
+      END IF;
+    END;
+  END;
+
+  DBMS_OUTPUT.PUT_LINE('Процедуры:');
+  FOR rec IN (
+    SELECT object_name FROM all_objects
+    WHERE owner = UPPER(p_dev_schema) AND object_type = 'PROCEDURE'
+    ORDER BY object_name
+  ) LOOP
+    BEGIN
+      v_dev_ddl := DBMS_METADATA.GET_DDL('PROCEDURE', rec.object_name, UPPER(p_dev_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_dev_ddl := 'NO DDL';
+    END;
+    BEGIN
+      v_prod_ddl := DBMS_METADATA.GET_DDL('PROCEDURE', rec.object_name, UPPER(p_prod_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_prod_ddl := 'NO DDL';
+    END;
+    IF v_prod_ddl = 'NO DDL' OR normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+      DBMS_OUTPUT.PUT_LINE('  ' || rec.object_name);
     END IF;
-END determine_table_creation_order;
+  END LOOP;
 
-CREATE OR REPLACE TYPE CLOB_LIST AS TABLE OF CLOB;
+  DBMS_OUTPUT.PUT_LINE('Функции:');
+  FOR rec IN (
+    SELECT object_name FROM all_objects
+    WHERE owner = UPPER(p_dev_schema) AND object_type = 'FUNCTION'
+    ORDER BY object_name
+  ) LOOP
+    BEGIN
+      v_dev_ddl := DBMS_METADATA.GET_DDL('FUNCTION', rec.object_name, UPPER(p_dev_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_dev_ddl := 'NO DDL';
+    END;
+    BEGIN
+      v_prod_ddl := DBMS_METADATA.GET_DDL('FUNCTION', rec.object_name, UPPER(p_prod_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_prod_ddl := 'NO DDL';
+    END;
+    IF v_prod_ddl = 'NO DDL' OR normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+      DBMS_OUTPUT.PUT_LINE('  ' || rec.object_name);
+    END IF;
+  END LOOP;
 
+  DBMS_OUTPUT.PUT_LINE('Пакеты:');
+  FOR rec IN (
+    SELECT object_name FROM all_objects
+    WHERE owner = UPPER(p_dev_schema) AND object_type = 'PACKAGE'
+    ORDER BY object_name
+  ) LOOP
+    BEGIN
+      v_dev_ddl := DBMS_METADATA.GET_DDL('PACKAGE', rec.object_name, UPPER(p_dev_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_dev_ddl := 'NO DDL';
+    END;
+    BEGIN
+      v_prod_ddl := DBMS_METADATA.GET_DDL('PACKAGE', rec.object_name, UPPER(p_prod_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_prod_ddl := 'NO DDL';
+    END;
+    IF v_prod_ddl = 'NO DDL' OR normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+      DBMS_OUTPUT.PUT_LINE('  ' || rec.object_name || ' (PACKAGE)');
+    END IF;
+  END LOOP;
+
+  DBMS_OUTPUT.PUT_LINE('Индексы:');
+  FOR rec IN (
+    SELECT index_name FROM all_indexes
+    WHERE owner = UPPER(p_dev_schema) AND index_name NOT LIKE 'SYS_%'
+    ORDER BY index_name
+  ) LOOP
+    BEGIN
+      v_dev_ddl := DBMS_METADATA.GET_DDL('INDEX', rec.index_name, UPPER(p_dev_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_dev_ddl := 'NO DDL';
+    END;
+    BEGIN
+      v_prod_ddl := DBMS_METADATA.GET_DDL('INDEX', rec.index_name, UPPER(p_prod_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_prod_ddl := 'NO DDL';
+    END;
+    IF v_prod_ddl = 'NO DDL' OR normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+      DBMS_OUTPUT.PUT_LINE('  ' || rec.index_name);
+    END IF;
+  END LOOP;
+
+  DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'CONSTRAINTS', TRUE);
+  DBMS_OUTPUT.PUT_LINE('Скрипт чтобы привести ' || p_prod_schema || ' к ' || p_dev_schema);
+  FOR rec IN (SELECT table_name FROM all_tables WHERE owner = UPPER(p_dev_schema))
+  LOOP
+    BEGIN
+      v_dev_ddl := DBMS_METADATA.GET_DDL('TABLE', rec.table_name, UPPER(p_dev_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_dev_ddl := 'NO DDL';
+    END;
+    BEGIN
+      v_prod_ddl := DBMS_METADATA.GET_DDL('TABLE', rec.table_name, UPPER(p_prod_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_prod_ddl := 'NO DDL';
+    END;
+    IF v_prod_ddl = 'NO DDL' THEN
+      DBMS_OUTPUT.PUT_LINE(replace_schema(v_dev_ddl) || ';');
+    ELSIF normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+      DBMS_OUTPUT.PUT_LINE('DROP TABLE ' || rec.table_name || ' CASCADE CONSTRAINTS;');
+      DBMS_OUTPUT.PUT_LINE(replace_schema(v_dev_ddl) || ';');
+    END IF;
+  END LOOP;
+  FOR rec IN (
+    SELECT table_name FROM all_tables
+    WHERE owner = UPPER(p_prod_schema)
+      AND table_name NOT IN (SELECT table_name FROM all_tables WHERE owner = UPPER(p_dev_schema))
+  )
+  LOOP
+    DBMS_OUTPUT.PUT_LINE('DROP TABLE ' || rec.table_name || ' CASCADE CONSTRAINTS;');
+  END LOOP;
+
+  FOR rec IN (SELECT object_name FROM all_objects
+              WHERE owner = UPPER(p_dev_schema) AND object_type = 'PROCEDURE')
+  LOOP
+    BEGIN
+      v_dev_ddl := DBMS_METADATA.GET_DDL('PROCEDURE', rec.object_name, UPPER(p_dev_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_dev_ddl := 'NO DDL';
+    END;
+    BEGIN
+      v_prod_ddl := DBMS_METADATA.GET_DDL('PROCEDURE', rec.object_name, UPPER(p_prod_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_prod_ddl := 'NO DDL';
+    END;
+    IF v_prod_ddl = 'NO DDL' THEN
+      DBMS_OUTPUT.PUT_LINE(replace_schema(v_dev_ddl) || ';');
+    ELSIF normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+      DBMS_OUTPUT.PUT_LINE('DROP PROCEDURE ' || rec.object_name || ';');
+      DBMS_OUTPUT.PUT_LINE(replace_schema(v_dev_ddl) || ';');
+    END IF;
+  END LOOP;
+  FOR rec IN (
+    SELECT object_name FROM all_objects
+    WHERE owner = UPPER(p_prod_schema) AND object_type = 'PROCEDURE'
+      AND object_name NOT IN (
+        SELECT object_name FROM all_objects
+        WHERE owner = UPPER(p_dev_schema) AND object_type = 'PROCEDURE'
+      )
+  )
+  LOOP
+    DBMS_OUTPUT.PUT_LINE('DROP PROCEDURE ' || rec.object_name || ';');
+  END LOOP;
+
+  FOR rec IN (SELECT object_name FROM all_objects
+              WHERE owner = UPPER(p_dev_schema) AND object_type = 'FUNCTION')
+  LOOP
+    BEGIN
+      v_dev_ddl := DBMS_METADATA.GET_DDL('FUNCTION', rec.object_name, UPPER(p_dev_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_dev_ddl := 'NO DDL';
+    END;
+    BEGIN
+      v_prod_ddl := DBMS_METADATA.GET_DDL('FUNCTION', rec.object_name, UPPER(p_prod_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_prod_ddl := 'NO DDL';
+    END;
+    IF v_prod_ddl = 'NO DDL' THEN
+      DBMS_OUTPUT.PUT_LINE(replace_schema(v_dev_ddl) || ';');
+    ELSIF normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+      DBMS_OUTPUT.PUT_LINE('DROP FUNCTION ' || rec.object_name || ';');
+      DBMS_OUTPUT.PUT_LINE(replace_schema(v_dev_ddl) || ';');
+    END IF;
+  END LOOP;
+  FOR rec IN (
+    SELECT object_name FROM all_objects
+    WHERE owner = UPPER(p_prod_schema) AND object_type = 'FUNCTION'
+      AND object_name NOT IN (
+        SELECT object_name FROM all_objects
+        WHERE owner = UPPER(p_dev_schema) AND object_type = 'FUNCTION'
+      )
+  )
+  LOOP
+    DBMS_OUTPUT.PUT_LINE('DROP FUNCTION ' || rec.object_name || ';');
+  END LOOP;
+
+  FOR rec IN (SELECT object_name FROM all_objects
+              WHERE owner = UPPER(p_dev_schema) AND object_type = 'PACKAGE')
+  LOOP
+    BEGIN
+      v_dev_ddl := DBMS_METADATA.GET_DDL('PACKAGE', rec.object_name, UPPER(p_dev_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_dev_ddl := 'NO DDL';
+    END;
+    BEGIN
+      v_prod_ddl := DBMS_METADATA.GET_DDL('PACKAGE', rec.object_name, UPPER(p_prod_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_prod_ddl := 'NO DDL';
+    END;
+    IF v_prod_ddl = 'NO DDL' THEN
+      DBMS_OUTPUT.PUT_LINE(replace_schema(v_dev_ddl) || ';');
+    ELSIF normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+      DBMS_OUTPUT.PUT_LINE('DROP PACKAGE ' || rec.object_name || ';');
+      DBMS_OUTPUT.PUT_LINE(replace_schema(v_dev_ddl) || ';');
+    END IF;
+  END LOOP;
+  FOR rec IN (
+    SELECT object_name FROM all_objects
+    WHERE owner = UPPER(p_prod_schema) AND object_type = 'PACKAGE'
+      AND object_name NOT IN (
+        SELECT object_name FROM all_objects
+        WHERE owner = UPPER(p_dev_schema) AND object_type = 'PACKAGE'
+      )
+  )
+  LOOP
+    DBMS_OUTPUT.PUT_LINE('DROP PACKAGE ' || rec.object_name || ';');
+  END LOOP;
+
+  FOR rec IN (SELECT index_name FROM all_indexes
+              WHERE owner = UPPER(p_dev_schema) AND index_name NOT LIKE 'SYS_%')
+  LOOP
+    BEGIN
+      v_dev_ddl := DBMS_METADATA.GET_DDL('INDEX', rec.index_name, UPPER(p_dev_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_dev_ddl := 'NO DDL';
+    END;
+    BEGIN
+      v_prod_ddl := DBMS_METADATA.GET_DDL('INDEX', rec.index_name, UPPER(p_prod_schema));
+    EXCEPTION WHEN OTHERS THEN
+      v_prod_ddl := 'NO DDL';
+    END;
+    IF v_prod_ddl = 'NO DDL' THEN
+      DBMS_OUTPUT.PUT_LINE(replace_schema(v_dev_ddl) || ';');
+    ELSIF normalize_ddl(v_dev_ddl) <> normalize_ddl(v_prod_ddl) THEN
+      DBMS_OUTPUT.PUT_LINE('DROP INDEX ' || rec.index_name || ';');
+      DBMS_OUTPUT.PUT_LINE(replace_schema(v_dev_ddl) || ';');
+    END IF;
+  END LOOP;
+  FOR rec IN (
+    SELECT index_name FROM all_indexes
+    WHERE owner = UPPER(p_prod_schema) AND index_name NOT LIKE 'SYS_%'
+      AND index_name NOT IN (
+        SELECT index_name FROM all_indexes
+        WHERE owner = UPPER(p_dev_schema) AND index_name NOT LIKE 'SYS_%'
+      )
+  )
+  LOOP
+    DBMS_OUTPUT.PUT_LINE('DROP INDEX ' || rec.index_name || ';');
+  END LOOP;
+
+END;
 
 BEGIN
-    compare_schemes('DEV_SCHEMA', 'PROD_SCHEMA');
+  Compare_Schemas('DEV_SCHEMA', 'PROD_SCHEMA');
 END;
