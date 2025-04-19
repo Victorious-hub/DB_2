@@ -15,6 +15,8 @@ CREATE TABLE prod_schema.Company (
     CompanyName VARCHAR2(255)
 );
 
+
+
 CREATE TABLE prod_schema.Department (
     DepartmentID INT PRIMARY KEY,
     CompanyID INT,
@@ -86,6 +88,7 @@ CREATE TABLE prod_schema.table_c (
     name VARCHAR2(100),
     CONSTRAINT fk_c_b FOREIGN KEY (b_id) REFERENCES prod_schema.table_b (id)
 );
+
 
 CREATE TABLE prod_schema.table_d (
     id NUMBER PRIMARY KEY,
