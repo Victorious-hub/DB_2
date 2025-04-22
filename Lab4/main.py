@@ -1,8 +1,8 @@
 from datetime import datetime
 import oracledb
 import json
+from dataclasses import dataclass
 
-# Utility Classes
 class JoinBlock:
     def __init__(self, join_type, table, on):
         self.join_type = join_type
@@ -49,25 +49,30 @@ class DdlCommand:
         self.table = table
         self.fields = fields or []
 
-# Filter Builder
+
 def build_filter(fc: dict):
     parts = []
 
+    # Handle EXISTS and NOT EXISTS
+    if fc.get("operator", "").upper() in ("EXISTS", "NOT EXISTS") and "subquery" in fc:
+        sub_query_sql = build_select_query(fc["subquery"])
+        parts.append(f"{fc['operator'].upper()} ({sub_query_sql})")
+
     # Handle expression with subquery and operator (e.g., "ID IN (SELECT ...)")
-    if fc.get("expression") and fc.get("subquery") and fc.get("operator"):
+    elif fc.get("expression") and fc.get("subquery") and fc.get("operator"):
         sub_query_sql = build_select_query(fc["subquery"])
         parts.append(f"{fc['expression']} {fc['operator']} ({sub_query_sql})")
 
-    # Handle basic expression only
+    # Handle basic expression only (e.g., "NAME = 'Test'")
     elif fc.get("expression"):
         parts.append(fc["expression"])
 
-    # Handle subquery only (no expression/operator)
+    # Handle subquery only (no expression/operator) - uncommon but included for flexibility
     elif fc.get("subquery"):
         sub_query_sql = build_select_query(fc["subquery"])
         parts.append(f"({sub_query_sql})")
 
-    # Handle nested filters
+    # Handle nested sub-filters
     if fc.get("sub_filters"):
         sub_parts = [build_filter(sub) for sub in fc["sub_filters"] if sub]
         connector = f" {fc.get('logical_connector', 'AND')} "
@@ -78,7 +83,25 @@ def build_filter(fc: dict):
     if len(parts) > 1:
         logical_connector = fc.get("logical_connector", "AND")
         return f"({f' {logical_connector} '.join(parts)})"
+
     return parts[0] if parts else ""
+
+
+def get_cursor(conn, json_data):
+    try:
+        cmd = json.loads(json_data)  # Parse the JSON to command
+        query = build_select_query(cmd)  # Build the query
+        print("Executing query with get_cursor:", query)
+
+        cursor = conn.cursor()
+        cursor.execute(query)
+
+        return cursor  # Return cursor for further usage
+
+    except Exception as e:
+        print(f"Error in get_cursor: {e}")
+        return None  # In case of error, return None
+
 
 # SELECT Builder
 def build_select_query(cmd: dict):
@@ -96,11 +119,22 @@ def execute_select(conn, json_data):
     cmd = json.loads(json_data)
     query = build_select_query(cmd)
     print("Executing SELECT:", query)
-    with conn.cursor() as cursor:
-        cursor.execute(query)
-        columns = [col[0] for col in cursor.description]
-        for row in cursor:
-            print(dict(zip(columns, row)))
+    
+    # Используем get_cursor для получения курсора
+    cursor = get_cursor(conn, json_data)
+    
+    if cursor:
+        try:
+            columns = [col[0] for col in cursor.description]
+            for row in cursor:
+                print(dict(zip(columns, row)))
+        except Exception as e:
+            print(f"Error while fetching data: {e}")
+        finally:
+            cursor.close()  # Закрываем курсор после использования
+    else:
+        print("Failed to execute SELECT query")
+
 
 # DML Execution
 def execute_dml(conn, json_data):
@@ -121,10 +155,14 @@ def execute_dml(conn, json_data):
         query += " WHERE " + " AND ".join(filter_parts)
 
     print("Executing DML:", query)
-    with conn.cursor() as cursor:
-        cursor.execute(query)
-        print("Rows affected:", cursor.rowcount)
-    conn.commit()
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(query)
+            print("Rows affected:", cursor.rowcount)
+            conn.commit()
+    except Exception as e:
+        print(f"Error during DML execution: {e}")
 
 # DDL Execution
 def execute_ddl(conn, json_data):
@@ -263,7 +301,7 @@ if __name__ == "__main__":
     }'''
     execute_dml(conn, dml_insert1)
 
-    # SELECT with nested filter
+    # SELECT with nested filter (IN)
     select_nested = '''
     {
         "query_type": "SELECT",
@@ -309,7 +347,7 @@ if __name__ == "__main__":
     }'''
     execute_dml(conn, dml_update)
 
-    # SELECT with subquery filter
+    # SELECT with subquery filter (IN)
     select_subquery = '''
     {
         "query_type": "SELECT",
@@ -378,6 +416,74 @@ if __name__ == "__main__":
         ]
     }'''
     execute_select(conn, select_join)
+
+    # 🔸 SELECT with NOT IN
+    select_not_in = '''
+    {
+        "query_type": "SELECT",
+        "columns": ["ID", "NAME"],
+        "tables": ["MY_TEST"],
+        "filters": [
+            {
+                "expression": "ID",
+                "operator": "NOT IN",
+                "subquery": {
+                    "query_type": "SELECT",
+                    "columns": ["TEST_ID"],
+                    "tables": ["MY_TEST2"]
+                }
+            }
+        ]
+    }'''
+    execute_select(conn, select_not_in)
+
+    # 🔸 SELECT with EXISTS
+    select_exists = '''
+    {
+        "query_type": "SELECT",
+        "columns": ["ID", "NAME"],
+        "tables": ["MY_TEST"],
+        "filters": [
+            {
+                "operator": "EXISTS",
+                "subquery": {
+                    "query_type": "SELECT",
+                    "columns": ["*"],
+                    "tables": ["MY_TEST2"],
+                    "filters": [
+                        {
+                            "expression": "MY_TEST2.TEST_ID = MY_TEST.ID"
+                        }
+                    ]
+                }
+            }
+        ]
+    }'''
+    execute_select(conn, select_exists)
+
+    # 🔸 SELECT with NOT EXISTS
+    select_not_exists = '''
+    {
+        "query_type": "SELECT",
+        "columns": ["ID", "NAME"],
+        "tables": ["MY_TEST"],
+        "filters": [
+            {
+                "operator": "NOT EXISTS",
+                "subquery": {
+                    "query_type": "SELECT",
+                    "columns": ["*"],
+                    "tables": ["MY_TEST2"],
+                    "filters": [
+                        {
+                            "expression": "MY_TEST2.TEST_ID = MY_TEST.ID"
+                        }
+                    ]
+                }
+            }
+        ]
+    }'''
+    execute_select(conn, select_not_exists)
 
     # Cursor-like result (print rows)
     cursor_select = '''
